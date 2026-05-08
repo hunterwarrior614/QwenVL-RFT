@@ -11,6 +11,11 @@ from typing import Iterable
 import pyarrow.parquet as pq
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_OUTPUT_DIR = Path("data")
+DEFAULT_INPUT_PATH = Path("../Thyme-SFT/data/wo_thinking_thyme_single_round-00000-of-00146.parquet")
+
+
 THINK_PATTERN = re.compile(r"<think>(.*?)</think>", re.IGNORECASE | re.DOTALL)
 ANSWER_PATTERN = re.compile(r"<answer>(.*?)</answer>", re.IGNORECASE | re.DOTALL)
 TAG_PATTERN = re.compile(r"</?[^>]+>")
@@ -33,16 +38,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--input",
         type=Path,
-        default=Path(
-            "/root/rivermind-data/Thyme-SFT/data/"
-            "wo_thinking_thyme_single_round-00000-of-00146.parquet"
-        ),
+        default=DEFAULT_INPUT_PATH,
         help="Input parquet file.",
     )
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("/root/rivermind-data/NJU_RL_examine"),
+        default=DEFAULT_OUTPUT_DIR,
         help="Directory for generated RL dataset files.",
     )
     parser.add_argument(
@@ -377,6 +379,10 @@ def write_manifest(
 
 def main() -> None:
     args = parse_args()
+    if not args.input.is_absolute():
+        args.input = PROJECT_ROOT / args.input
+    if not args.output_dir.is_absolute():
+        args.output_dir = PROJECT_ROOT / args.output_dir
     prefix = args.output_prefix or args.input.stem
     args.output_dir.mkdir(parents=True, exist_ok=True)
 

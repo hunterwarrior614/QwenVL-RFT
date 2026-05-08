@@ -1,0 +1,61 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.conda/
+.python-version
+
+# Tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+.cache/
+
+# IDE / editor
+.vscode/
+.idea/
+
+# Local agent / assistant metadata
+.agents/
+.codex/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs and trackers
+*.log
+wandb/
+runs/
+
+# Local experiment outputs
+outputs/
+
+# Runtime artifacts
+*.pt
+*.pth
+*.bin
+*.safetensors
+
+# Large local datasets and generated data files
+*.jsonl
+*.parquet
+*.arrow
+*.qwen_vl_rl_manifest.json
+
+# Optional notebook exports
+*.html
