@@ -26,6 +26,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.qwen_vl_rl.modeling_ppo import get_torch_dtype
+from src.qwen_vl_rl.reports import extract_first_image_uri, write_prediction_report
+from src.qwen_vl_rl.reward import extract_choice_letter
 from src.qwen_vl_rl.sft import QwenVLSFTCollator, create_sft_datasets_from_ppo_records
 from src.qwen_vl_rl.utils import dump_json, ensure_dir, resolve_project_path, set_seed
 
@@ -120,17 +122,73 @@ def evaluate(
             prediction = processor.tokenizer.decode(
                 generated[row_idx, prompt_length:], skip_special_tokens=True
             ).strip()
-            exact += int(prediction[:1].strip().upper() == target)
+            pred_letter = extract_choice_letter(prediction)
+            target_letter = extract_choice_letter(target)
+            exact += int(pred_letter == target_letter)
             total += 1
 
         if max_batches is not None and batch_index + 1 >= max_batches:
             break
 
+    stats = torch.tensor(
+        [sum(losses), float(len(losses)), float(exact), float(total)],
+        device=accelerator.device,
+        dtype=torch.float64,
+    )
+    if accelerator.num_processes > 1:
+        stats = accelerator.reduce(stats, reduction='sum')
+
     policy.train()
     return {
-        'eval_loss': sum(losses) / max(len(losses), 1),
-        'eval_exact_match': exact / max(total, 1),
+        'eval_loss': float(stats[0].item() / max(float(stats[1].item()), 1.0)),
+        'eval_exact_match': float(stats[2].item() / max(float(stats[3].item()), 1.0)),
     }
+
+
+@torch.no_grad()
+def generate_test_predictions(
+    policy,
+    processor,
+    test_loader,
+    accelerator,
+    max_new_tokens: int,
+) -> list[dict]:
+    policy.eval()
+    records = []
+    for batch in test_loader:
+        prompt_inputs = move_to_device(batch['prompt_inputs'], accelerator.device)
+        generated = accelerator.unwrap_model(policy).generate(
+            input_ids=prompt_inputs['input_ids'],
+            attention_mask=prompt_inputs['attention_mask'],
+            pixel_values=prompt_inputs['pixel_values'],
+            image_grid_thw=prompt_inputs['image_grid_thw'],
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            pad_token_id=processor.tokenizer.pad_token_id,
+            eos_token_id=processor.tokenizer.eos_token_id,
+        )
+        prompt_length = prompt_inputs['input_ids'].shape[1]
+        for row_idx, sample_id in enumerate(batch['sample_ids']):
+            prediction = processor.tokenizer.decode(
+                generated[row_idx, prompt_length:], skip_special_tokens=True
+            ).strip()
+            pred_letter = extract_choice_letter(prediction)
+            answer_key = extract_choice_letter(batch['target_texts'][row_idx])
+            records.append(
+                {
+                    'sample_id': int(sample_id),
+                    'question': batch['questions'][row_idx],
+                    'answer_key': answer_key,
+                    'ground_truth': batch['target_texts'][row_idx],
+                    'prediction': prediction,
+                    'pred_letter': pred_letter,
+                    'correct': pred_letter == answer_key,
+                    'image': extract_first_image_uri(batch['messages'][row_idx]),
+                }
+            )
+
+    policy.train()
+    return records
 
 
 def save_checkpoint(model, processor, optimizer, output_dir: Path, step: int) -> None:
@@ -280,6 +338,12 @@ def main() -> None:
         shuffle=False,
         collate_fn=collator,
     )
+    test_report_loader = DataLoader(
+        test_dataset,
+        batch_size=config['per_device_eval_batch_size'],
+        shuffle=False,
+        collate_fn=collator,
+    )
 
     optimizer = AdamW(
         [parameter for parameter in model.parameters() if parameter.requires_grad],
@@ -403,14 +467,25 @@ def main() -> None:
             break
 
     accelerator.wait_for_everyone()
+    final_metrics = evaluate(
+        model,
+        processor,
+        eval_loader,
+        accelerator,
+        max_new_tokens=config['max_new_tokens_eval'],
+    )
     if accelerator.is_main_process:
-        final_metrics = evaluate(
+        test_predictions = generate_test_predictions(
             accelerator.unwrap_model(model),
             processor,
-            eval_loader,
+            test_report_loader,
             accelerator,
             max_new_tokens=config['max_new_tokens_eval'],
-            max_batches=8,
+        )
+        report_paths = write_prediction_report(
+            test_predictions,
+            output_dir,
+            name='final_test_predictions',
         )
         append_metric(
             output_dir,
@@ -442,6 +517,7 @@ def main() -> None:
                 'global_step': global_step,
                 'total_steps': total_steps,
                 'final_eval': final_metrics,
+                'final_test_predictions': report_paths,
             },
             output_dir / 'train_summary.json',
         )

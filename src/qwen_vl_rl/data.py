@@ -126,6 +126,7 @@ class QwenVLPPOCollator:
             'sample_ids': sample_ids,
             'answer_keys': answer_keys,
             'questions': questions,
+            'messages': [copy.deepcopy(sample['messages']) for sample in batch],
             'prompt_texts': prompt_texts,
             'prompt_images': prompt_images,
             'prompt_inputs': inputs,

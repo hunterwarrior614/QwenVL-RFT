@@ -108,6 +108,8 @@ class QwenVLSFTCollator:
         model_inputs['labels'] = labels
         return {
             'sample_ids': sample_ids,
+            'messages': [copy.deepcopy(sample['messages']) for sample in batch],
+            'questions': [sample['question'] for sample in batch],
             'model_inputs': model_inputs,
             'prompt_inputs': prompt_inputs,
             'target_texts': [sample['target_text'] for sample in batch],
