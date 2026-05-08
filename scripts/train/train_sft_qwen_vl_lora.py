@@ -305,7 +305,9 @@ def main() -> None:
             f"per_device_train_batch_size={config['per_device_train_batch_size']} "
             f"grad_accum={config['gradient_accumulation_steps']} "
             f"total_steps={total_steps} "
-            f"warmup_steps={warmup_steps}",
+            f"warmup_steps={warmup_steps} "
+            f"num_processes={accelerator.num_processes} "
+            f"process_index={accelerator.process_index}",
             flush=True,
         )
 

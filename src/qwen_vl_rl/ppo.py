@@ -5,7 +5,7 @@ from typing import Any
 
 import torch
 
-from .modeling_ppo import gather_log_probs
+from .modeling_ppo import compute_policy_outputs_from_model_outputs, gather_log_probs
 from .reward import score_choice_predictions
 
 
@@ -210,11 +210,20 @@ def generate_rollout_batch(
 
 
 def compute_ppo_losses(policy, minibatch: dict[str, torch.Tensor], cliprange: float, value_cliprange: float, vf_coef: float, entropy_coef: float) -> dict[str, torch.Tensor]:
-    outputs = policy.evaluate_actions(
+    model_outputs = policy(
         input_ids=minibatch['sequences'],
         attention_mask=minibatch['full_attention_mask'],
         pixel_values=minibatch['pixel_values'],
         image_grid_thw=minibatch['image_grid_thw'],
+        output_hidden_states=True,
+        use_cache=False,
+        return_dict=True,
+    )
+    policy_module = policy.module if hasattr(policy, 'module') else policy
+    outputs = compute_policy_outputs_from_model_outputs(
+        model_wrapper=policy_module,
+        input_ids=minibatch['sequences'],
+        outputs=model_outputs,
     )
     logprobs = outputs['logprobs']
     values = outputs['values']

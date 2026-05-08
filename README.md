@@ -114,6 +114,8 @@ if torch.cuda.is_available():
 PY
 ```
 
+如果服务器上有多张卡，`python scripts/train/...py` 仍然通常只会使用 `cuda:0`。原因是当前训练脚本虽然使用了 `Accelerator()`，但只有在通过 `accelerate launch` 启动为多进程时，才会真正启用多卡分布式训练。
+
 ## 7. 执行命令
 
 ### 7.0 准备
@@ -155,7 +157,7 @@ python scripts/data_process/convert_thyme_sft_to_qwen_vl_rl.py \
 
 ### 7.2 先做 SFT warm start
 
-最小 smoke test：
+单卡 smoke test：
 
 ```bash
 python scripts/train/train_sft_qwen_vl_lora.py \
@@ -163,10 +165,27 @@ python scripts/train/train_sft_qwen_vl_lora.py \
   --max-steps 2
 ```
 
-正式训练：
+单卡正式训练：
 
 ```bash
 python scripts/train/train_sft_qwen_vl_lora.py \
+  --config configs/sft_qwen_vl_lora.yaml
+```
+
+4 卡 smoke test：
+
+```bash
+accelerate launch --num_processes 4 \
+  scripts/train/train_sft_qwen_vl_lora.py \
+  --config configs/sft_qwen_vl_lora.yaml \
+  --max-steps 2
+```
+
+4 卡正式训练：
+
+```bash
+accelerate launch --num_processes 4 \
+  scripts/train/train_sft_qwen_vl_lora.py \
   --config configs/sft_qwen_vl_lora.yaml
 ```
 
@@ -182,7 +201,7 @@ python scripts/train/train_sft_qwen_vl_lora.py \
 sft_adapter_path: outputs/sft/default/checkpoint-2/adapter
 ```
 
-PPO smoke test：
+单卡 PPO smoke test：
 
 ```bash
 python scripts/train/train_ppo_qwen_vl_lora.py \
@@ -190,10 +209,27 @@ python scripts/train/train_ppo_qwen_vl_lora.py \
   --max-steps 1
 ```
 
-PPO 正式训练：
+单卡 PPO 正式训练：
 
 ```bash
 python scripts/train/train_ppo_qwen_vl_lora.py \
+  --config configs/ppo_qwen_vl_lora.yaml
+```
+
+4 卡 PPO smoke test：
+
+```bash
+accelerate launch --num_processes 4 \
+  scripts/train/train_ppo_qwen_vl_lora.py \
+  --config configs/ppo_qwen_vl_lora.yaml \
+  --max-steps 1
+```
+
+4 卡 PPO 正式训练：
+
+```bash
+accelerate launch --num_processes 4 \
+  scripts/train/train_ppo_qwen_vl_lora.py \
   --config configs/ppo_qwen_vl_lora.yaml
 ```
 

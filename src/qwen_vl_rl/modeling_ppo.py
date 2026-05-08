@@ -69,6 +69,9 @@ class PPOPolicyWithValueHead(nn.Module):
     def forward(self, **kwargs):
         return self.policy_model(**kwargs)
 
+    def compute_value_from_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return self.value_head(self.value_dropout(hidden_states)).squeeze(-1)
+
     def evaluate_actions(self, input_ids: torch.Tensor, **model_kwargs) -> dict[str, torch.Tensor]:
         outputs = self.policy_model(
             input_ids=input_ids,
@@ -77,17 +80,11 @@ class PPOPolicyWithValueHead(nn.Module):
             return_dict=True,
             **model_kwargs,
         )
-        logits = outputs.logits[:, :-1, :]
-        hidden_states = outputs.hidden_states[-1][:, :-1, :]
-        values = self.value_head(self.value_dropout(hidden_states)).squeeze(-1)
-        target_tokens = input_ids[:, 1:]
-        logprobs = gather_log_probs(logits, target_tokens)
-        entropy = categorical_entropy_from_logits(logits)
-        return {
-            'logprobs': logprobs,
-            'values': values,
-            'entropy': entropy,
-        }
+        return compute_policy_outputs_from_model_outputs(
+            model_wrapper=self,
+            input_ids=input_ids,
+            outputs=outputs,
+        )
 
 
 def build_policy_model(model_config, lora_config) -> PPOPolicyWithValueHead:
@@ -158,6 +155,24 @@ def categorical_entropy_from_logits(logits: torch.Tensor) -> torch.Tensor:
     log_probs = torch.log_softmax(logits, dim=-1)
     probs = torch.exp(log_probs)
     return -(probs * log_probs).sum(dim=-1)
+
+
+def compute_policy_outputs_from_model_outputs(
+    model_wrapper: PPOPolicyWithValueHead,
+    input_ids: torch.Tensor,
+    outputs,
+) -> dict[str, torch.Tensor]:
+    logits = outputs.logits[:, :-1, :]
+    hidden_states = outputs.hidden_states[-1][:, :-1, :]
+    values = model_wrapper.compute_value_from_hidden_states(hidden_states)
+    target_tokens = input_ids[:, 1:]
+    logprobs = gather_log_probs(logits, target_tokens)
+    entropy = categorical_entropy_from_logits(logits)
+    return {
+        'logprobs': logprobs,
+        'values': values,
+        'entropy': entropy,
+    }
 
 
 def _load_base_model(model_config) -> Qwen2_5_VLForConditionalGeneration:

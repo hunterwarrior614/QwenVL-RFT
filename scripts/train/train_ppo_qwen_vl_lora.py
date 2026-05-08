@@ -349,7 +349,9 @@ def main() -> None:
             f'prompt_batch_size={config.ppo.per_device_prompt_batch_size} '
             f'minibatch_size={config.ppo.per_device_minibatch_size} '
             f'ppo_epochs={config.ppo.ppo_epochs} '
-            f'total_steps={total_steps}',
+            f'total_steps={total_steps} '
+            f'num_processes={accelerator.num_processes} '
+            f'process_index={accelerator.process_index}',
             flush=True,
         )
 
