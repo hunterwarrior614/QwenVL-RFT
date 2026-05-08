@@ -147,7 +147,7 @@ def _convert_records(records) -> list[SFTRecord]:
         SFTRecord(
             sample_id=record.sample_id,
             messages=record.messages,
-            target_text=record.choice_letter,
+            target_text=f'<answer>{record.choice_letter}</answer>',
             question=record.question,
         )
         for record in records

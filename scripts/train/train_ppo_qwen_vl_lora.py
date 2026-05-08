@@ -65,8 +65,8 @@ def run_evaluation(
     max_batches: int | None = None,
 ) -> dict[str, float]:
     policy.eval()
-    rewards = []
-    lengths = []
+    reward_sum = 0.0
+    length_sum = 0.0
     valid = 0
     total = 0
 
@@ -79,21 +79,32 @@ def run_evaluation(
             generation_config=config.generation,
             ppo_config=config.ppo,
             accelerator=accelerator,
+            eval_mode=True,
         )
-        rewards.append(float(rollout.scores.mean().item()))
-        lengths.append(float(rollout.response_mask.sum(dim=1).float().mean().item()))
+        batch_count = len(rollout.pred_letters)
+        reward_sum += float(rollout.scores.sum().item())
+        length_sum += float(rollout.response_mask.sum(dim=1).float().sum().item())
         valid += sum(letter is not None for letter in rollout.pred_letters)
-        total += len(rollout.pred_letters)
+        total += batch_count
         if max_batches is not None and batch_index + 1 >= max_batches:
             break
 
+    stats = torch.tensor(
+        [reward_sum, length_sum, float(valid), float(total)],
+        device=accelerator.device,
+        dtype=torch.float64,
+    )
+    if accelerator.num_processes > 1:
+        stats = accelerator.reduce(stats, reduction='sum')
+
     policy.train()
-    reward_mean = sum(rewards) / max(len(rewards), 1)
-    length_mean = sum(lengths) / max(len(lengths), 1)
+    total_count = max(float(stats[3].item()), 1.0)
+    reward_mean = float(stats[0].item() / total_count)
+    length_mean = float(stats[1].item() / total_count)
     return {
         'reward_mean': reward_mean,
         'accuracy': reward_mean,
-        'valid_option_rate': valid / max(total, 1),
+        'valid_option_rate': float(stats[2].item() / total_count),
         'response_length_mean': length_mean,
     }
 
@@ -255,13 +266,15 @@ def main() -> None:
     set_seed(config.seed)
 
     output_dir = ensure_dir(config.logging.output_dir)
-    dump_json(config.to_dict(), output_dir / 'resolved_config.json')
-    metrics_path = output_dir / 'metrics.jsonl'
-    metrics_path.write_text('', encoding='utf-8')   # 清空文件内容
 
     # 创建了一个 Accelerator 对象
     # 其作用是自动处理分布式训练（多 GPU、TPU、混合精度等），同时简化设备管理、梯度累积和混合精度训练等代码
     accelerator = Accelerator(gradient_accumulation_steps=1)
+    if accelerator.is_main_process:
+        dump_json(config.to_dict(), output_dir / 'resolved_config.json')
+        metrics_path = output_dir / 'metrics.jsonl'
+        metrics_path.write_text('', encoding='utf-8')   # 清空文件内容
+    accelerator.wait_for_everyone()
 
     if accelerator.is_main_process:
         print('Loading processor and datasets...')
@@ -416,7 +429,10 @@ def main() -> None:
                     )
                     optimizer.zero_grad(set_to_none=True)
                     accelerator.backward(loss_dict['loss'])
+
+                    # 梯度裁剪，对策略网络中的所有可训练参数的梯度进行全局范数裁剪，限制梯度的最大范数不超过 max_grad_norm
                     accelerator.clip_grad_norm_(policy.parameters(), config.optimizer.max_grad_norm)
+                    
                     optimizer.step()
                     epoch_metrics = {key: float(value.detach().float().item()) for key, value in loss_dict.items()}
 
@@ -466,16 +482,15 @@ def main() -> None:
             break
 
     accelerator.wait_for_everyone()
+    final_eval = run_evaluation(
+        policy=policy,
+        reference_model=reference_model,
+        processor=processor,
+        eval_loader=eval_loader,
+        config=config,
+        accelerator=accelerator,
+    )
     if accelerator.is_main_process:
-        final_eval = run_evaluation(
-            policy=policy,
-            reference_model=reference_model,
-            processor=processor,
-            eval_loader=eval_loader,
-            config=config,
-            accelerator=accelerator,
-            max_batches=8,
-        )
         final_eval['step'] = float(global_step)
         final_eval['epoch'] = float(config.num_train_epochs - 1)
         final_eval['total_steps'] = float(total_steps)

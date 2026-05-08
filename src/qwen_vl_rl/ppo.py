@@ -93,6 +93,7 @@ def generate_rollout_batch(
     generation_config,
     ppo_config,
     accelerator,
+    eval_mode: bool = False,
 ) -> RolloutBatch:
     prompt_inputs = move_batch_to_device(batch['prompt_inputs'], accelerator.device)
     prompt_attention_mask = prompt_inputs['attention_mask']
@@ -104,10 +105,12 @@ def generate_rollout_batch(
         'attention_mask': prompt_attention_mask,
         'pixel_values': prompt_inputs['pixel_values'],
         'image_grid_thw': prompt_inputs['image_grid_thw'],
-        'do_sample': generation_config.do_sample,
-        'temperature': generation_config.temperature,
-        'top_p': generation_config.top_p,
-        'max_new_tokens': generation_config.max_new_tokens,
+        'do_sample': False if eval_mode else generation_config.do_sample,
+        'max_new_tokens': (
+            generation_config.eval_max_new_tokens
+            if eval_mode
+            else generation_config.max_new_tokens
+        ),
         'min_new_tokens': generation_config.min_new_tokens,
         'repetition_penalty': generation_config.repetition_penalty,
         'pad_token_id': processor.tokenizer.pad_token_id,
@@ -116,7 +119,10 @@ def generate_rollout_batch(
         'output_scores': False,
         'use_cache': True,
     }
-    if generation_config.top_k and generation_config.top_k > 0:
+    if not eval_mode and generation_config.do_sample:
+        generation_kwargs['temperature'] = generation_config.temperature
+        generation_kwargs['top_p'] = generation_config.top_p
+    if not eval_mode and generation_config.top_k and generation_config.top_k > 0:
         generation_kwargs['top_k'] = generation_config.top_k
 
     unwrapped_policy = accelerator.unwrap_model(policy)
@@ -235,17 +241,21 @@ def compute_ppo_losses(policy, minibatch: dict[str, torch.Tensor], cliprange: fl
     advantages = minibatch['advantages']
     returns = minibatch['returns']
 
-    ratio = torch.exp(logprobs - old_logprobs)
+    # 策略损失
+    ratio = torch.exp(logprobs - old_logprobs)  # 重要性采样比率
     pg_loss_1 = -advantages * ratio
     pg_loss_2 = -advantages * torch.clamp(ratio, 1.0 - cliprange, 1.0 + cliprange)
     policy_loss = masked_mean(torch.maximum(pg_loss_1, pg_loss_2), mask)
 
+    # 价值损失
     value_pred_clipped = old_values + torch.clamp(values - old_values, -value_cliprange, value_cliprange)
     value_loss_1 = (values - returns) ** 2
     value_loss_2 = (value_pred_clipped - returns) ** 2
     value_loss = 0.5 * masked_mean(torch.maximum(value_loss_1, value_loss_2), mask)
 
+    # 熵正则项（强化学习中的技术：为了鼓励探索，通常在策略损失中减去熵的加权项）
     entropy_loss = masked_mean(entropy, mask)
+    
     total_loss = policy_loss + vf_coef * value_loss - entropy_coef * entropy_loss
 
     clipfrac = masked_mean((torch.abs(ratio - 1.0) > cliprange).float(), mask)

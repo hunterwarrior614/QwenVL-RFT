@@ -3,10 +3,8 @@ from __future__ import annotations
 import re
 from typing import Iterable
 
-# re.IGNORECASE → 忽略大小写
-# re.DOTALL → 使得 . 匹配包括换行符 \n 在内的任意字符，从而可以跨行匹配
-CHOICE_PATTERN = re.compile(r'\b([A-D])\b', re.IGNORECASE)
 ANSWER_TAG_PATTERN = re.compile(r'<answer>(.*?)</answer>', re.IGNORECASE | re.DOTALL)
+EXACT_CHOICE_PATTERN = re.compile(r'^\s*([A-Da-d])\s*(?:[\)\].:：、-]\s*)?$')
 
 
 def extract_choice_letter(text: str) -> str | None:
@@ -14,16 +12,13 @@ def extract_choice_letter(text: str) -> str | None:
         return None
 
     match = ANSWER_TAG_PATTERN.search(text)
-    if match:
-        text = match.group(1)
+    if not match:
+        return None
 
-    text = text.strip()
-    if text.upper() in {'A', 'B', 'C', 'D'}:
-        return text.upper()
-
-    match = CHOICE_PATTERN.search(text)
-    if match:
-        return match.group(1).upper()
+    answer_text = match.group(1).strip()
+    choice_match = EXACT_CHOICE_PATTERN.fullmatch(answer_text)
+    if choice_match:
+        return choice_match.group(1).upper()
     return None
 
 

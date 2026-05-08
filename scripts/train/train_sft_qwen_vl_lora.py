@@ -203,15 +203,17 @@ def main() -> None:
     set_seed(config['seed'])
 
     output_dir = ensure_dir(config['output_dir'])
-    dump_json(config, output_dir / 'resolved_config.json')
-    metrics_path = output_dir / 'metrics.jsonl'
-    metrics_path.write_text('', encoding='utf-8')
 
     # 每经过 gradient_accumulation_steps 个 mini-batch 才执行一次参数更新，
     # 当显存不足以支持较大的批次时，通过梯度累积来模拟更大的有效批次。
     accelerator = Accelerator(
         gradient_accumulation_steps=config['gradient_accumulation_steps']
     )
+    if accelerator.is_main_process:
+        dump_json(config, output_dir / 'resolved_config.json')
+        metrics_path = output_dir / 'metrics.jsonl'
+        metrics_path.write_text('', encoding='utf-8')
+    accelerator.wait_for_everyone()
     # 加载模型
     processor = AutoProcessor.from_pretrained(config['base_model_name_or_path'])
 

@@ -147,7 +147,7 @@ def save_policy_checkpoint(policy: PPOPolicyWithValueHead, output_dir: str | Pat
 
 
 def gather_log_probs(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-    log_probs = torch.log_softmax(logits, dim=-1)
+    log_probs = torch.log_softmax(logits, dim=-1)   # 注意这里是自然对数概率，即对 softmax 的结果取自然对数 
     return torch.gather(log_probs, dim=-1, index=labels.unsqueeze(-1)).squeeze(-1)
 
 

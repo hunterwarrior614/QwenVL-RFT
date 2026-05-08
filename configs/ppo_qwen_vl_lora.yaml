@@ -55,7 +55,7 @@ ppo:
   kl_coef: 0.02
   gamma: 1.0
   lam: 0.95
-  whiten_advantages: true
+  whiten_advantages: false
   entropy_coef: 0.0
 logging:
   output_dir: outputs/ppo/default
