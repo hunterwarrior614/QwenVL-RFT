@@ -30,6 +30,7 @@ def test_write_prediction_report_writes_jsonl_and_html(tmp_path):
             'question': 'Q?',
             'answer_key': 'A',
             'ground_truth': '<answer>A</answer>',
+            'raw_response': '  <answer>A</answer>\n',
             'prediction': '<answer>A</answer>',
             'pred_letter': 'A',
             'correct': True,
@@ -61,7 +62,7 @@ def test_generate_prediction_records_from_loader():
         eos_token_id = 2
 
         def decode(self, tokens, skip_special_tokens=True):
-            return '<answer>A</answer>'
+            return '  <answer>A</answer>\n'
 
     class FakeProcessor:
         tokenizer = FakeTokenizer()
@@ -113,6 +114,7 @@ def test_generate_prediction_records_from_loader():
             'question': 'Q?',
             'answer_key': 'A',
             'ground_truth': 'A',
+            'raw_response': '  <answer>A</answer>\n',
             'prediction': '<answer>A</answer>',
             'pred_letter': 'A',
             'correct': True,

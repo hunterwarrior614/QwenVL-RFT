@@ -60,7 +60,7 @@ def run_evaluation(
     policy,
     reference_model,
     processor,
-    eval_loader,
+    valid_loader,
     config,
     accelerator,
     max_batches: int | None = None,
@@ -71,7 +71,7 @@ def run_evaluation(
     valid = 0
     total = 0
 
-    for batch_index, batch in enumerate(eval_loader):
+    for batch_index, batch in enumerate(valid_loader):
         rollout = generate_rollout_batch(
             policy=policy,
             reference_model=reference_model,
@@ -283,7 +283,7 @@ def main() -> None:
     # 创建了一个多模态处理器（Processor），专门用于处理视觉语言模型（如 Qwen2.5-VL）的输入
     processor = AutoProcessor.from_pretrained(config.model.base_model_name_or_path)
 
-    train_dataset, eval_dataset, test_dataset = create_split_datasets(
+    train_dataset, valid_dataset, test_dataset = create_split_datasets(
         jsonl_path=config.data.train_file,
         train_size=config.data.train_size,
         eval_size=config.data.eval_size,
@@ -299,11 +299,11 @@ def main() -> None:
     dump_json(
         {
             'train_size': len(train_dataset),
-            'eval_size': len(eval_dataset),
+            'eval_size': len(valid_dataset),
             'test_size': len(test_dataset),
             'split_seed': config.data.split_seed,
             'train_ids': [sample['sample_id'] for sample in train_dataset],
-            'eval_ids': [sample['sample_id'] for sample in eval_dataset],
+            'eval_ids': [sample['sample_id'] for sample in valid_dataset],
             'test_ids': [sample['sample_id'] for sample in test_dataset],
         },
         output_dir / 'dataset_split.json',
@@ -317,8 +317,8 @@ def main() -> None:
         num_workers=config.data.num_workers,  # 用于数据加载的子进程数量
         pin_memory=torch.cuda.is_available(),
     )
-    eval_loader = DataLoader(
-        eval_dataset,
+    valid_loader = DataLoader(
+        valid_dataset,
         batch_size=config.ppo.per_device_prompt_batch_size,
         shuffle=False,
         collate_fn=collator,
@@ -352,12 +352,12 @@ def main() -> None:
         weight_decay=config.optimizer.weight_decay,
     )
 
-    policy, reference_model, optimizer, train_loader, eval_loader = accelerator.prepare(
+    policy, reference_model, optimizer, train_loader, valid_loader = accelerator.prepare(
         policy,
         reference_model,
         optimizer,
         train_loader,
-        eval_loader,
+        valid_loader,
     )
     reference_model.eval()
     total_steps = len(train_loader) * config.num_train_epochs
@@ -367,7 +367,7 @@ def main() -> None:
         print(
             '[ppo/setup] '
             f'train_samples={len(train_dataset)} '
-            f'eval_samples={len(eval_dataset)} '
+            f'valid_samples={len(valid_dataset)} '
             f'prompt_batch_size={config.ppo.per_device_prompt_batch_size} '
             f'minibatch_size={config.ppo.per_device_minibatch_size} '
             f'ppo_epochs={config.ppo.ppo_epochs} '
@@ -382,7 +382,7 @@ def main() -> None:
             policy=policy,
             reference_model=reference_model,
             processor=processor,
-            eval_loader=eval_loader,
+            valid_loader=valid_loader,
             config=config,
             accelerator=accelerator,
             max_batches=args.max_steps,
@@ -413,11 +413,10 @@ def main() -> None:
                     'global_step': 0,
                     'total_steps': total_steps,
                     'final_eval': metrics,
-                    'final_test_predictions': report_paths,
+                    'test_results': report_paths,
                 },
-                output_dir / 'eval_summary.json',
+                output_dir / 'test_summary.json',
             )
-            render_training_curve(output_dir)
         return
 
     global_step = 0
@@ -483,7 +482,7 @@ def main() -> None:
                     policy=policy,
                     reference_model=reference_model,
                     processor=processor,
-                    eval_loader=eval_loader,
+                    valid_loader=valid_loader,
                     config=config,
                     accelerator=accelerator,
                 )
@@ -513,7 +512,7 @@ def main() -> None:
         policy=policy,
         reference_model=reference_model,
         processor=processor,
-        eval_loader=eval_loader,
+        valid_loader=valid_loader,
         config=config,
         accelerator=accelerator,
     )
@@ -543,7 +542,7 @@ def main() -> None:
                 'global_step': global_step,
                 'total_steps': total_steps,
                 'final_eval': final_eval,
-                'final_test_predictions': report_paths,
+                'test_results': report_paths,
             },
             output_dir / 'train_summary.json',
         )

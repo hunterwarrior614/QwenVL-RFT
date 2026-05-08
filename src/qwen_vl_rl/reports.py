@@ -45,12 +45,13 @@ def generate_prediction_records(
         prompt_length = prompt_inputs['input_ids'].shape[1]
 
         for row_idx, sample_id in enumerate(batch['sample_ids']):
-            prediction = processor.tokenizer.decode(
+            raw_response = processor.tokenizer.decode(
                 sequences[row_idx, prompt_length:],
                 skip_special_tokens=True,
-            ).strip()
+            )
+            prediction = raw_response.strip()
             answer_key, ground_truth = _extract_target(batch, row_idx)
-            pred_letter = extract_choice_letter(prediction)
+            pred_letter = extract_choice_letter(raw_response)
             records.append(
                 {
                     'sample_id': int(sample_id),
@@ -58,6 +59,7 @@ def generate_prediction_records(
                     'question': _get_optional_list_value(batch, 'questions', row_idx, ''),
                     'answer_key': answer_key,
                     'ground_truth': ground_truth,
+                    'raw_response': raw_response,
                     'prediction': prediction,
                     'pred_letter': pred_letter,
                     'correct': pred_letter == answer_key,
@@ -77,7 +79,7 @@ def write_prediction_report_from_loader(
     accelerator,
     max_new_tokens: int,
     output_dir: str | Path,
-    name: str = 'final_test_predictions',
+    name: str = 'test_results',
 ) -> dict[str, str]:
     records = generate_prediction_records(
         policy=policy,
@@ -229,7 +231,7 @@ def _render_record(record: dict[str, Any]) -> str:
     image_uri = record.get('image', '')
     status_class = 'correct' if record.get('correct') else 'wrong'
     status_text = 'correct' if record.get('correct') else 'wrong'
-    prediction = record.get('prediction', '')
+    raw_response = record.get('raw_response', record.get('prediction', ''))
     pred_letter = record.get('pred_letter')
     answer_key = record.get('answer_key', '')
 
@@ -250,8 +252,8 @@ def _render_record(record: dict[str, Any]) -> str:
     <div class="label">Question</div>
     <pre>{html.escape(record.get('question', ''))}</pre>
     {_render_optional_prompt(record)}
-    <div class="label">Model Output</div>
-    <pre>{html.escape(prediction)}</pre>
+    <div class="label">Raw Response</div>
+    <pre>{html.escape(raw_response)}</pre>
     <div class="label">Ground Truth</div>
     <pre>{html.escape(record.get('ground_truth', ''))}</pre>
   </div>

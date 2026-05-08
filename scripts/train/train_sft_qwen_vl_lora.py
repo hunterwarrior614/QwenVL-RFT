@@ -92,7 +92,7 @@ def move_to_device(batch: dict, device: torch.device) -> dict:
 def evaluate(
     policy,
     processor,
-    eval_loader,
+    valid_loader,
     accelerator,
     max_new_tokens: int,
     max_batches: int | None = None,
@@ -101,7 +101,7 @@ def evaluate(
     losses = []
     exact = 0
     total = 0
-    for batch_index, batch in enumerate(eval_loader):
+    for batch_index, batch in enumerate(valid_loader):
         model_inputs = move_to_device(batch['model_inputs'], accelerator.device)
         outputs = policy(**model_inputs)
         losses.append(float(outputs.loss.detach().float().item()))
@@ -229,7 +229,7 @@ def main() -> None:
     # 加载模型
     processor = AutoProcessor.from_pretrained(config['base_model_name_or_path'])
 
-    train_dataset, eval_dataset, test_dataset = create_sft_datasets_from_ppo_records(
+    train_dataset, valid_dataset, test_dataset = create_sft_datasets_from_ppo_records(
         jsonl_path=config['train_file'],
         train_size=config['train_size'],
         eval_size=config['eval_size'],
@@ -241,11 +241,11 @@ def main() -> None:
     dump_json(
         {
             'train_size': len(train_dataset),
-            'eval_size': len(eval_dataset),
+            'eval_size': len(valid_dataset),
             'test_size': len(test_dataset),
             'split_seed': config['split_seed'],
             'train_ids': [sample['sample_id'] for sample in train_dataset],
-            'eval_ids': [sample['sample_id'] for sample in eval_dataset],
+            'eval_ids': [sample['sample_id'] for sample in valid_dataset],
             'test_ids': [sample['sample_id'] for sample in test_dataset],
         },
         output_dir / 'dataset_split.json',
@@ -286,8 +286,8 @@ def main() -> None:
         shuffle=True,
         collate_fn=collator,
     )
-    eval_loader = DataLoader(
-        eval_dataset,
+    valid_loader = DataLoader(
+        valid_dataset,
         batch_size=config['per_device_eval_batch_size'],
         shuffle=False,
         collate_fn=collator,
@@ -321,7 +321,7 @@ def main() -> None:
         print(
             '[sft/setup] '
             f"train_samples={len(train_dataset)} "
-            f"eval_samples={len(eval_dataset)} "
+            f"valid_samples={len(valid_dataset)} "
             f"per_device_train_batch_size={config['per_device_train_batch_size']} "
             f"grad_accum={config['gradient_accumulation_steps']} "
             f"total_steps={total_steps} "
@@ -331,11 +331,11 @@ def main() -> None:
             flush=True,
         )
 
-    model, optimizer, train_loader, eval_loader, scheduler = accelerator.prepare(
+    model, optimizer, train_loader, valid_loader, scheduler = accelerator.prepare(
         model,
         optimizer,
         train_loader,
-        eval_loader,
+        valid_loader,
         scheduler,
     )
 
@@ -381,7 +381,7 @@ def main() -> None:
                     metrics = evaluate(
                         model,
                         processor,
-                        eval_loader,
+                        valid_loader,
                         accelerator,
                         max_new_tokens=config['max_new_tokens_eval'],
                         max_batches=8,
@@ -424,7 +424,7 @@ def main() -> None:
     final_metrics = evaluate(
         model,
         processor,
-        eval_loader,
+        valid_loader,
         accelerator,
         max_new_tokens=config['max_new_tokens_eval'],
     )
@@ -467,7 +467,7 @@ def main() -> None:
                 'global_step': global_step,
                 'total_steps': total_steps,
                 'final_eval': final_metrics,
-                'final_test_predictions': report_paths,
+                'test_results': report_paths,
             },
             output_dir / 'train_summary.json',
         )

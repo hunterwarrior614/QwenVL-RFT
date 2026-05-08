@@ -157,14 +157,14 @@ PPO / GRPO 的 `model.sft_adapter_path` 要先指向你要接续的 SFT checkpoi
 
 ## 8. 推理与结果查看
 
-三种训练都会在 `final_eval` 阶段自动跑测试集，并生成逐样本报告：
+三种训练都会在训练结束后自动跑测试集，并生成逐样本报告：
 
-- `outputs/sft/<run_name>/final_test_predictions.html`
-- `outputs/sft/<run_name>/final_test_predictions.jsonl`
-- `outputs/ppo/<run_name>/final_test_predictions.html`
-- `outputs/ppo/<run_name>/final_test_predictions.jsonl`
-- `outputs/grpo/<run_name>/final_test_predictions.html`
-- `outputs/grpo/<run_name>/final_test_predictions.jsonl`
+- `outputs/sft/<run_name>/test_results.html`
+- `outputs/sft/<run_name>/test_results.jsonl`
+- `outputs/ppo/<run_name>/test_results.html`
+- `outputs/ppo/<run_name>/test_results.jsonl`
+- `outputs/grpo/<run_name>/test_results.html`
+- `outputs/grpo/<run_name>/test_results.jsonl`
 
 PPO / GRPO 还支持只跑评估，并会生成同样的测试集逐样本报告：
 
@@ -177,7 +177,10 @@ python scripts/train/train_grpo_qwen_vl_lora.py --config configs/grpo_qwen_vl_lo
 
 - SFT：`outputs/sft/<run_name>/metrics.jsonl`、`training_curve.png`、`train_summary.json`
 - PPO / GRPO：日志中的 `reward_mean`、`accuracy`、`valid_option_rate`、`response_length_mean`、`kl_mean`
-- 测试集直观效果：相应目录下的 `final_test_predictions.html`
+- 测试集直观效果：相应目录下的 `test_results.html`
+
+说明：配置里的 `eval_size` 指 validation split；测试集只用于最终逐样本报告。
+报告中的 `raw_response` 是模型原始 decoded response，`prediction` 是去掉首尾空白后的版本。
 
 ## 9. 当前默认配置
 
