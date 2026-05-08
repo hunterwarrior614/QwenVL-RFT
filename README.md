@@ -166,7 +166,7 @@ PPO / GRPO 的 `model.sft_adapter_path` 要先指向你要接续的 SFT checkpoi
 - `outputs/grpo/<run_name>/final_test_predictions.html`
 - `outputs/grpo/<run_name>/final_test_predictions.jsonl`
 
-PPO / GRPO 还支持只跑评估：
+PPO / GRPO 还支持只跑评估，并会生成同样的测试集逐样本报告：
 
 ```bash
 python scripts/train/train_ppo_qwen_vl_lora.py --config configs/ppo_qwen_vl_lora.yaml --eval-only

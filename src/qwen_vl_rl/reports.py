@@ -5,6 +5,10 @@ import json
 from pathlib import Path
 from typing import Any
 
+import torch
+
+from .reward import extract_choice_letter
+
 
 def extract_first_image_uri(messages: list[dict[str, Any]]) -> str:
     for message in messages:
@@ -12,6 +16,77 @@ def extract_first_image_uri(messages: list[dict[str, Any]]) -> str:
             if item.get('type') == 'image':
                 return item.get('image', '')
     return ''
+
+
+@torch.no_grad()
+def generate_prediction_records(
+    policy,
+    processor,
+    loader,
+    accelerator,
+    max_new_tokens: int,
+) -> list[dict[str, Any]]:
+    model = accelerator.unwrap_model(policy)
+    was_training = model.training
+    model.eval()
+
+    records: list[dict[str, Any]] = []
+    for batch in loader:
+        prompt_inputs = _move_tensors_to_device(batch['prompt_inputs'], accelerator.device)
+        generated = model.generate(
+            **prompt_inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+            pad_token_id=processor.tokenizer.pad_token_id,
+            eos_token_id=processor.tokenizer.eos_token_id,
+            use_cache=True,
+        )
+        sequences = generated.sequences if hasattr(generated, 'sequences') else generated
+        prompt_length = prompt_inputs['input_ids'].shape[1]
+
+        for row_idx, sample_id in enumerate(batch['sample_ids']):
+            prediction = processor.tokenizer.decode(
+                sequences[row_idx, prompt_length:],
+                skip_special_tokens=True,
+            ).strip()
+            answer_key, ground_truth = _extract_target(batch, row_idx)
+            pred_letter = extract_choice_letter(prediction)
+            records.append(
+                {
+                    'sample_id': int(sample_id),
+                    'prompt': _get_optional_list_value(batch, 'prompt_texts', row_idx, ''),
+                    'question': _get_optional_list_value(batch, 'questions', row_idx, ''),
+                    'answer_key': answer_key,
+                    'ground_truth': ground_truth,
+                    'prediction': prediction,
+                    'pred_letter': pred_letter,
+                    'correct': pred_letter == answer_key,
+                    'image': extract_first_image_uri(batch['messages'][row_idx]),
+                }
+            )
+
+    if was_training:
+        model.train()
+    return records
+
+
+def write_prediction_report_from_loader(
+    policy,
+    processor,
+    loader,
+    accelerator,
+    max_new_tokens: int,
+    output_dir: str | Path,
+    name: str = 'final_test_predictions',
+) -> dict[str, str]:
+    records = generate_prediction_records(
+        policy=policy,
+        processor=processor,
+        loader=loader,
+        accelerator=accelerator,
+        max_new_tokens=max_new_tokens,
+    )
+    return write_prediction_report(records, output_dir=output_dir, name=name)
 
 
 def write_prediction_report(records: list[dict[str, Any]], output_dir: str | Path, name: str) -> dict[str, str]:
@@ -174,9 +249,49 @@ def _render_record(record: dict[str, Any]) -> str:
     </div>
     <div class="label">Question</div>
     <pre>{html.escape(record.get('question', ''))}</pre>
+    {_render_optional_prompt(record)}
     <div class="label">Model Output</div>
     <pre>{html.escape(prediction)}</pre>
     <div class="label">Ground Truth</div>
     <pre>{html.escape(record.get('ground_truth', ''))}</pre>
   </div>
 </article>'''
+
+
+def _move_tensors_to_device(batch: dict[str, Any], device: torch.device) -> dict[str, Any]:
+    return {
+        key: value.to(device) if torch.is_tensor(value) else value
+        for key, value in batch.items()
+    }
+
+
+def _extract_target(batch: dict[str, Any], row_idx: int) -> tuple[str | None, str]:
+    if 'target_texts' in batch:
+        ground_truth = batch['target_texts'][row_idx]
+        return extract_choice_letter(ground_truth), ground_truth
+
+    answer_key = _get_optional_list_value(batch, 'answer_keys', row_idx, None)
+    ground_truth = _get_optional_list_value(batch, 'ground_truths', row_idx, answer_key or '')
+    return answer_key, ground_truth
+
+
+def _get_optional_list_value(
+    batch: dict[str, Any],
+    key: str,
+    row_idx: int,
+    default: Any,
+) -> Any:
+    values = batch.get(key)
+    if values is None or row_idx >= len(values):
+        return default
+    return values[row_idx]
+
+
+def _render_optional_prompt(record: dict[str, Any]) -> str:
+    prompt = record.get('prompt', '')
+    if not prompt:
+        return ''
+    return f'''<details>
+      <summary class="label">Prompt</summary>
+      <pre>{html.escape(prompt)}</pre>
+    </details>'''

@@ -97,6 +97,7 @@ class QwenVLPPOCollator:
         sample_ids = []
         answer_keys = []
         questions = []
+        ground_truths = []
 
         for sample in batch:
             prompt_texts.append(
@@ -115,6 +116,7 @@ class QwenVLPPOCollator:
             sample_ids.append(sample['sample_id'])
             answer_keys.append(sample['choice_letter'])
             questions.append(sample['question'])
+            ground_truths.append(sample.get('ground_truth', sample['choice_letter']))
 
         inputs = self.processor(
             text=prompt_texts,
@@ -126,6 +128,7 @@ class QwenVLPPOCollator:
             'sample_ids': sample_ids,
             'answer_keys': answer_keys,
             'questions': questions,
+            'ground_truths': ground_truths,
             'messages': [copy.deepcopy(sample['messages']) for sample in batch],
             'prompt_texts': prompt_texts,
             'prompt_images': prompt_images,
@@ -160,6 +163,7 @@ class QwenVLGRPOCollator(QwenVLPPOCollator):
                 'messages': sample['prompt'],
                 'question': sample['question'],
                 'choice_letter': sample['reward_target'],
+                'ground_truth': sample['ground_truth'],
             }
             for sample in batch
         ]

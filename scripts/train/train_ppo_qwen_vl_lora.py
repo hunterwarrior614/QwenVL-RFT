@@ -22,7 +22,7 @@ from src.qwen_vl_rl.config import load_config
 from src.qwen_vl_rl.data import QwenVLPPOCollator, create_split_datasets
 from src.qwen_vl_rl.modeling_ppo import build_policy_model, build_reference_model, save_policy_checkpoint
 from src.qwen_vl_rl.ppo import build_minibatch, compute_ppo_losses, generate_rollout_batch
-from src.qwen_vl_rl.reports import extract_first_image_uri, write_prediction_report
+from src.qwen_vl_rl.reports import write_prediction_report_from_loader
 from src.qwen_vl_rl.utils import dump_json, ensure_dir, resolve_project_path, set_seed
 
 
@@ -108,48 +108,6 @@ def run_evaluation(
         'valid_option_rate': float(stats[2].item() / total_count),
         'response_length_mean': length_mean,
     }
-
-
-@torch.no_grad()
-def generate_test_predictions(
-    policy,
-    reference_model,
-    processor,
-    test_loader,
-    config,
-    accelerator,
-) -> list[dict]:
-    policy.eval()
-    records = []
-    for batch in test_loader:
-        rollout = generate_rollout_batch(
-            policy=policy,
-            reference_model=reference_model,
-            processor=processor,
-            batch=batch,
-            generation_config=config.generation,
-            ppo_config=config.ppo,
-            accelerator=accelerator,
-            eval_mode=True,
-        )
-        for row_idx, sample_id in enumerate(rollout.sample_ids):
-            answer_key = rollout.answer_keys[row_idx]
-            pred_letter = rollout.pred_letters[row_idx]
-            records.append(
-                {
-                    'sample_id': int(sample_id),
-                    'question': batch['questions'][row_idx],
-                    'answer_key': answer_key,
-                    'ground_truth': answer_key,
-                    'prediction': rollout.response_texts[row_idx],
-                    'pred_letter': pred_letter,
-                    'correct': pred_letter == answer_key,
-                    'image': extract_first_image_uri(batch['messages'][row_idx]),
-                }
-            )
-
-    policy.train()
-    return records
 
 
 def append_metric(output_dir: Path, record: dict) -> None:
@@ -367,7 +325,7 @@ def main() -> None:
         num_workers=config.data.num_workers,
         pin_memory=torch.cuda.is_available(),
     )
-    test_report_loader = DataLoader(
+    test_loader = DataLoader(
         test_dataset,
         batch_size=config.ppo.per_device_prompt_batch_size,
         shuffle=False,
@@ -430,6 +388,14 @@ def main() -> None:
             max_batches=args.max_steps,
         )
         if accelerator.is_main_process:
+            report_paths = write_prediction_report_from_loader(
+                policy=policy,
+                processor=processor,
+                loader=test_loader,
+                accelerator=accelerator,
+                max_new_tokens=config.generation.eval_max_new_tokens,
+                output_dir=output_dir,
+            )
             append_metric(
                 output_dir,
                 {
@@ -441,6 +407,16 @@ def main() -> None:
                 },
             )
             print('Eval metrics:', metrics)
+            dump_json(
+                {
+                    'test_size': len(test_dataset),
+                    'global_step': 0,
+                    'total_steps': total_steps,
+                    'final_eval': metrics,
+                    'final_test_predictions': report_paths,
+                },
+                output_dir / 'eval_summary.json',
+            )
             render_training_curve(output_dir)
         return
 
@@ -545,18 +521,13 @@ def main() -> None:
         final_eval['step'] = float(global_step)
         final_eval['epoch'] = float(config.num_train_epochs - 1)
         final_eval['total_steps'] = float(total_steps)
-        test_predictions = generate_test_predictions(
+        report_paths = write_prediction_report_from_loader(
             policy=policy,
-            reference_model=reference_model,
             processor=processor,
-            test_loader=test_report_loader,
-            config=config,
+            loader=test_loader,
             accelerator=accelerator,
-        )
-        report_paths = write_prediction_report(
-            test_predictions,
-            output_dir,
-            name='final_test_predictions',
+            max_new_tokens=config.generation.eval_max_new_tokens,
+            output_dir=output_dir,
         )
         append_metric(output_dir, {'phase': 'eval', **final_eval})
         log_metrics(

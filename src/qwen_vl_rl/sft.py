@@ -50,6 +50,8 @@ class QwenVLSFTCollator:
         prompt_images = []
         full_texts = []
         sample_ids = []
+        questions = []
+        target_texts = []
 
         for sample in batch:
             prompt_texts.append(
@@ -85,6 +87,8 @@ class QwenVLSFTCollator:
                 )
             )
             sample_ids.append(sample['sample_id'])
+            questions.append(sample['question'])
+            target_texts.append(sample['target_text'])
 
         model_inputs = self.processor(
             text=full_texts,
@@ -109,10 +113,11 @@ class QwenVLSFTCollator:
         return {
             'sample_ids': sample_ids,
             'messages': [copy.deepcopy(sample['messages']) for sample in batch],
-            'questions': [sample['question'] for sample in batch],
+            'questions': questions,
+            'prompt_texts': prompt_texts,
             'model_inputs': model_inputs,
             'prompt_inputs': prompt_inputs,
-            'target_texts': [sample['target_text'] for sample in batch],
+            'target_texts': target_texts,
         }
 
 
