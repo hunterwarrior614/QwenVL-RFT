@@ -91,6 +91,18 @@ class PPOConfig:
 
 
 @dataclass
+class GRPOConfig:
+    per_device_prompt_batch_size: int = 1
+    num_generations: int = 4
+    per_device_minibatch_size: int = 1
+    grpo_epochs: int = 1
+    cliprange: float = 0.2
+    kl_coef: float = 0.02
+    whiten_group_advantages: bool = True
+    entropy_coef: float = 0.0
+
+
+@dataclass
 class LoggingConfig:
     output_dir: str = 'outputs/ppo/default'
     logging_steps: int = 1
@@ -109,6 +121,22 @@ class PPOTrainConfig:
     generation: GenerationConfig = field(default_factory=GenerationConfig)
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     ppo: PPOConfig = field(default_factory=PPOConfig)
+    logging: LoggingConfig = field(default_factory=LoggingConfig)
+
+    def to_dict(self) -> dict[str, Any]:
+        return _to_plain_dict(self)
+
+
+@dataclass
+class GRPOTrainConfig:
+    seed: int = 42
+    num_train_epochs: int = 1
+    data: DataConfig = field(default_factory=DataConfig)
+    model: ModelConfig = field(default_factory=ModelConfig)
+    lora: LoRAConfig = field(default_factory=LoRAConfig)
+    generation: GenerationConfig = field(default_factory=GenerationConfig)
+    optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
+    grpo: GRPOConfig = field(default_factory=GRPOConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
 
     def to_dict(self) -> dict[str, Any]:
@@ -142,5 +170,16 @@ def load_config(config_path: str | Path) -> PPOTrainConfig:
     config = PPOTrainConfig(
         data=DataConfig(train_file=''),
         model=ModelConfig(base_model_name_or_path=''),
+    )
+    return _update_dataclass(config, payload or {})
+
+
+def load_grpo_config(config_path: str | Path) -> GRPOTrainConfig:
+    path = Path(config_path)
+    payload = yaml.safe_load(path.read_text(encoding='utf-8'))
+    config = GRPOTrainConfig(
+        data=DataConfig(train_file=''),
+        model=ModelConfig(base_model_name_or_path=''),
+        logging=LoggingConfig(output_dir='outputs/grpo/default'),
     )
     return _update_dataclass(config, payload or {})

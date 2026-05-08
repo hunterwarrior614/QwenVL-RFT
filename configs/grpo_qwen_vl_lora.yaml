@@ -1,7 +1,7 @@
 seed: 42
 num_train_epochs: 1
 data:
-  train_file: data/wo_thinking_thyme_single_round-00000-of-00146.qwen_vl_ppo.jsonl
+  train_file: data/wo_thinking_thyme_single_round-00000-of-00146.qwen_vl_grpo.jsonl
   train_size: 1000
   eval_size: 121
   test_size: 121
@@ -44,21 +44,17 @@ optimizer:
   adam_beta2: 0.95
   adam_epsilon: 1.0e-08
   max_grad_norm: 1.0
-ppo:
-  # 含义解释见 src/qwen_vl_rl/config.py 中 PPOConfig 类
+grpo:
   per_device_prompt_batch_size: 1
+  num_generations: 4
   per_device_minibatch_size: 1
-  ppo_epochs: 2
+  grpo_epochs: 1
   cliprange: 0.2
-  value_cliprange: 0.2
-  vf_coef: 0.5
   kl_coef: 0.02
-  gamma: 1.0
-  lam: 0.95
-  whiten_advantages: false
+  whiten_group_advantages: true
   entropy_coef: 0.0
 logging:
-  output_dir: outputs/ppo/default
+  output_dir: outputs/grpo/default
   logging_steps: 1
   eval_steps: 100
   save_steps: 100

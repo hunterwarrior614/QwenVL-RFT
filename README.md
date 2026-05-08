@@ -17,6 +17,7 @@
 - GRPO 数据：`data/wo_thinking_thyme_single_round-00000-of-00146.qwen_vl_grpo.jsonl`
 - SFT 训练脚本：`scripts/train/train_sft_qwen_vl_lora.py`
 - PPO 训练脚本：`scripts/train/train_ppo_qwen_vl_lora.py`
+- GRPO 训练脚本：`scripts/train/train_grpo_qwen_vl_lora.py`
 
 基础模型目录：
 
@@ -233,6 +234,50 @@ accelerate launch --num_processes 4 \
   --config configs/ppo_qwen_vl_lora.yaml
 ```
 
+### 7.4 或者做 GRPO
+
+先确认 `configs/grpo_qwen_vl_lora.yaml` 中的：
+
+- `model.sft_adapter_path`
+
+已经指向你要接续的 SFT checkpoint，例如：
+
+```yaml
+sft_adapter_path: outputs/sft/default/checkpoint-50/adapter
+```
+
+单卡 GRPO smoke test：
+
+```bash
+python scripts/train/train_grpo_qwen_vl_lora.py \
+  --config configs/grpo_qwen_vl_lora.yaml \
+  --max-steps 1
+```
+
+单卡 GRPO 正式训练：
+
+```bash
+python scripts/train/train_grpo_qwen_vl_lora.py \
+  --config configs/grpo_qwen_vl_lora.yaml
+```
+
+4 卡 GRPO smoke test：
+
+```bash
+accelerate launch --num_processes 4 \
+  scripts/train/train_grpo_qwen_vl_lora.py \
+  --config configs/grpo_qwen_vl_lora.yaml \
+  --max-steps 1
+```
+
+4 卡 GRPO 正式训练：
+
+```bash
+accelerate launch --num_processes 4 \
+  scripts/train/train_grpo_qwen_vl_lora.py \
+  --config configs/grpo_qwen_vl_lora.yaml
+```
+
 ## 8. 当前默认配置
 
 ### SFT
@@ -261,6 +306,20 @@ accelerate launch --num_processes 4 \
 - `load_in_4bit=true`
 - `gradient_checkpointing=true`
 - `per_device_prompt_batch_size=1`
+- `per_device_minibatch_size=1`
+
+### GRPO
+
+配置文件：`configs/grpo_qwen_vl_lora.yaml`
+
+默认关键设置：
+
+- 输出目录：`outputs/grpo/default/`
+- 从 SFT adapter 接续训练
+- `load_in_4bit=true`
+- `gradient_checkpointing=true`
+- `per_device_prompt_batch_size=1`
+- `num_generations=4`
 - `per_device_minibatch_size=1`
 
 ## 9. 如何查看训练效果
@@ -297,6 +356,19 @@ PPO 训练结束后，重点看：
 
 这些会直接打印在训练日志中。
 
+### GRPO
+
+GRPO 训练结束后，重点看：
+
+- `reward_mean`
+- `accuracy`
+- `valid_option_rate`
+- `response_length_mean`
+- `kl_mean`
+- `advantage_abs_mean`
+
+这些会直接打印在训练日志中。
+
 ## 10. 做完 SFT 之后具体做什么
 
 做完 SFT 后，下一步就是：
@@ -330,6 +402,13 @@ python scripts/train/train_ppo_qwen_vl_lora.py \
 
 python scripts/train/train_ppo_qwen_vl_lora.py \
   --config configs/ppo_qwen_vl_lora.yaml
+
+python scripts/train/train_grpo_qwen_vl_lora.py \
+  --config configs/grpo_qwen_vl_lora.yaml \
+  --max-steps 1
+
+python scripts/train/train_grpo_qwen_vl_lora.py \
+  --config configs/grpo_qwen_vl_lora.yaml
 ```
 
 ## 11. 目录结构
@@ -338,6 +417,7 @@ python scripts/train/train_ppo_qwen_vl_lora.py \
 configs/
   sft_qwen_vl_lora.yaml
   ppo_qwen_vl_lora.yaml
+  grpo_qwen_vl_lora.yaml
 data/
   wo_thinking_thyme_single_round-00000-of-00146.qwen_vl_ppo.jsonl
   wo_thinking_thyme_single_round-00000-of-00146.qwen_vl_grpo.jsonl
@@ -348,6 +428,7 @@ scripts/
   train/
     train_sft_qwen_vl_lora.py
     train_ppo_qwen_vl_lora.py
+    train_grpo_qwen_vl_lora.py
 src/
   qwen_vl_rl/
 outputs/

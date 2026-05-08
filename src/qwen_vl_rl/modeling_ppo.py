@@ -88,6 +88,11 @@ class PPOPolicyWithValueHead(nn.Module):
 
 
 def build_policy_model(model_config, lora_config) -> PPOPolicyWithValueHead:
+    policy_backbone = build_lora_policy_backbone(model_config, lora_config)
+    return PPOPolicyWithValueHead(policy_backbone)
+
+
+def build_lora_policy_backbone(model_config, lora_config) -> nn.Module:
     base_model = _load_base_model(model_config)
 
     if model_config.load_in_4bit:
@@ -120,7 +125,7 @@ def build_policy_model(model_config, lora_config) -> PPOPolicyWithValueHead:
         policy_backbone.config.use_cache = False        # 禁用 KV 缓存（因为检查点与缓存不兼容）
         policy_backbone.enable_input_require_grads()    # 确保输入需要梯度（防止某些层丢失梯度）
 
-    return PPOPolicyWithValueHead(policy_backbone)
+    return policy_backbone
 
 
 def build_reference_model(model_config) -> nn.Module:
@@ -142,6 +147,14 @@ def save_policy_checkpoint(policy: PPOPolicyWithValueHead, output_dir: str | Pat
     save_dir.mkdir(parents=True, exist_ok=True)
     policy.policy_model.save_pretrained(save_dir / 'adapter')
     torch.save(policy.value_head.state_dict(), save_dir / 'value_head.pt')
+    with (save_dir / 'metadata.json').open('w', encoding='utf-8') as handle:
+        json.dump(metadata, handle, ensure_ascii=False, indent=2)
+
+
+def save_lora_checkpoint(policy_model: nn.Module, output_dir: str | Path, metadata: dict[str, Any]) -> None:
+    save_dir = Path(output_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+    policy_model.save_pretrained(save_dir / 'adapter')
     with (save_dir / 'metadata.json').open('w', encoding='utf-8') as handle:
         json.dump(metadata, handle, ensure_ascii=False, indent=2)
 

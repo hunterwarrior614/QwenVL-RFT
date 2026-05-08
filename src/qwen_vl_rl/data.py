@@ -23,6 +23,16 @@ class ThymeVLPPORecord:
     reference_answer: str
 
 
+@dataclass
+class ThymeVLGRPORecord:
+    sample_id: int
+    prompt: list[dict[str, Any]]
+    question: str
+    choice_letter: str
+    reward_target: str
+    ground_truth: str
+
+
 class ThymeVLPPOJsonlDataset(Dataset):
     def __init__(self, records: list[ThymeVLPPORecord]):
         self.records = records
@@ -39,6 +49,25 @@ class ThymeVLPPOJsonlDataset(Dataset):
             'choice_letter': record.choice_letter,
             'ground_truth': record.ground_truth,
             'reference_answer': record.reference_answer,
+        }
+
+
+class ThymeVLGRPOJsonlDataset(Dataset):
+    def __init__(self, records: list[ThymeVLGRPORecord]):
+        self.records = records
+
+    def __len__(self) -> int:
+        return len(self.records)
+
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        record = self.records[index]
+        return {
+            'sample_id': record.sample_id,
+            'prompt': copy.deepcopy(record.prompt),
+            'question': record.question,
+            'choice_letter': record.choice_letter,
+            'reward_target': record.reward_target,
+            'ground_truth': record.ground_truth,
         }
 
 
@@ -122,6 +151,22 @@ class QwenVLPPOCollator:
     """
 
 
+class QwenVLGRPOCollator(QwenVLPPOCollator):
+    def __call__(self, batch: list[dict[str, Any]]) -> dict[str, Any]:
+        ppo_batch = [
+            {
+                'sample_id': sample['sample_id'],
+                'messages': sample['prompt'],
+                'question': sample['question'],
+                'choice_letter': sample['reward_target'],
+            }
+            for sample in batch
+        ]
+        output = super().__call__(ppo_batch)
+        output['reward_targets'] = [sample['reward_target'] for sample in batch]
+        return output
+
+
 def load_ppo_records(jsonl_path: str | Path) -> list[ThymeVLPPORecord]:
     records: list[ThymeVLPPORecord] = []
     path = Path(jsonl_path)
@@ -139,6 +184,30 @@ def load_ppo_records(jsonl_path: str | Path) -> list[ThymeVLPPORecord]:
                     choice_letter=choice_letter,
                     ground_truth=payload.get('ground_truth', ''),
                     reference_answer=payload.get('reference_answer', ''),
+                )
+            )
+    return records
+
+
+def load_grpo_records(jsonl_path: str | Path) -> list[ThymeVLGRPORecord]:
+    records: list[ThymeVLGRPORecord] = []
+    path = Path(jsonl_path)
+    with path.open('r', encoding='utf-8') as handle:
+        for line in handle:
+            payload = json.loads(line)
+            reward_target = (
+                payload.get('reward_target') or payload.get('choice_letter') or ''
+            ).strip().upper()
+            if reward_target not in {'A', 'B', 'C', 'D'}:
+                continue
+            records.append(
+                ThymeVLGRPORecord(
+                    sample_id=int(payload['id']),
+                    prompt=payload['prompt'],
+                    question=payload.get('question', ''),
+                    choice_letter=(payload.get('choice_letter') or reward_target).strip().upper(),
+                    reward_target=reward_target,
+                    ground_truth=payload.get('ground_truth', ''),
                 )
             )
     return records
@@ -176,6 +245,41 @@ def create_split_datasets(
         ThymeVLPPOJsonlDataset(train_records),
         ThymeVLPPOJsonlDataset(eval_records),
         ThymeVLPPOJsonlDataset(test_records),
+    )
+
+
+def create_grpo_split_datasets(
+    jsonl_path: str | Path,
+    train_size: int,
+    eval_size: int,
+    test_size: int,
+    split_seed: int,
+    max_train_samples: int | None = None,
+    max_eval_samples: int | None = None,
+) -> tuple[ThymeVLGRPOJsonlDataset, ThymeVLGRPOJsonlDataset, ThymeVLGRPOJsonlDataset]:
+    records = load_grpo_records(jsonl_path)
+    total_needed = train_size + eval_size + test_size
+    if len(records) < total_needed:
+        raise ValueError(
+            f'Not enough GRPO records: need {total_needed}, found {len(records)} in {jsonl_path}'
+        )
+
+    rng = random.Random(split_seed)
+    rng.shuffle(records)
+
+    train_records = records[:train_size]
+    eval_records = records[train_size : train_size + eval_size]
+    test_records = records[train_size + eval_size : total_needed]
+
+    if max_train_samples is not None:
+        train_records = train_records[:max_train_samples]
+    if max_eval_samples is not None:
+        eval_records = eval_records[:max_eval_samples]
+
+    return (
+        ThymeVLGRPOJsonlDataset(train_records),
+        ThymeVLGRPOJsonlDataset(eval_records),
+        ThymeVLGRPOJsonlDataset(test_records),
     )
 
 
