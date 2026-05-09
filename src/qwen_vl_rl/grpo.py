@@ -87,8 +87,6 @@ def generate_grpo_rollout_batch(
     policy_was_training = unwrapped_policy.training
     unwrapped_policy.eval()
     sequences = unwrapped_policy.generate(**generation_kwargs).sequences
-    if policy_was_training:
-        unwrapped_policy.train()
 
     eos_token_ids = _normalize_eos_ids(processor.tokenizer.eos_token_id)
     response_attention_mask = build_response_attention_mask(
@@ -115,6 +113,8 @@ def generate_grpo_rollout_batch(
         **model_inputs,
     )
     old_logprobs = gather_log_probs(policy_outputs.logits[:, :-1, :], sequences[:, 1:])
+    if policy_was_training:
+        unwrapped_policy.train()
 
     ref_outputs = reference_model(
         input_ids=sequences,

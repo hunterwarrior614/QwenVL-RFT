@@ -135,9 +135,6 @@ def generate_rollout_batch(
     unwrapped_policy.eval()
     sequences = unwrapped_policy.generate(**generation_kwargs).sequences
 
-    if policy_was_training:
-        unwrapped_policy.train()
-
     eos_token_ids = _normalize_eos_ids(processor.tokenizer.eos_token_id)
     response_attention_mask = build_response_attention_mask(sequences[:, prompt_padded_length:], eos_token_ids)
     full_attention_mask = torch.cat([prompt_attention_mask, response_attention_mask], dim=1)
@@ -153,6 +150,8 @@ def generate_rollout_batch(
     }
 
     old_policy_outputs = unwrapped_policy.evaluate_actions(sequences, **model_inputs)
+    if policy_was_training:
+        unwrapped_policy.train()
 
     ref_outputs = reference_model(
         input_ids=sequences,
