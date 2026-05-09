@@ -8,6 +8,7 @@ from torch.utils.data import Dataset
 
 from .collator_utils import (
     build_processor_inputs,
+    build_processor_inputs_with_padding_side,
     build_generation_prompt_texts,
     collect_prompt_metadata,
     decode_prompt_images,
@@ -75,11 +76,21 @@ class QwenVLSFTCollator:
                     tokenize=False,
                     add_generation_prompt=False,
                 )
-            )
+        )
             target_texts.append(sample['target_text'])
 
-        model_inputs = build_processor_inputs(self.processor, full_texts, prompt_images)
-        prompt_inputs = build_processor_inputs(self.processor, prompt_texts, prompt_images)
+        model_inputs = build_processor_inputs_with_padding_side(
+            self.processor,
+            full_texts,
+            prompt_images,
+            padding_side='right',
+        )
+        prompt_inputs = build_processor_inputs_with_padding_side(
+            self.processor,
+            prompt_texts,
+            prompt_images,
+            padding_side='left',
+        )
 
         labels = model_inputs['input_ids'].clone()
         labels[labels == self.processor.tokenizer.pad_token_id] = -100

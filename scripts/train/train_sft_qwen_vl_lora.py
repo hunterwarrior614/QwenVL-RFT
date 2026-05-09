@@ -405,9 +405,9 @@ def main() -> None:
                         output_dir,
                         global_step,
                     )
-                if args.max_steps is not None and global_step >= args.max_steps:
+                if global_step >= total_steps:
                     break
-        if args.max_steps is not None and global_step >= args.max_steps:
+        if global_step >= total_steps:
             break
 
     accelerator.wait_for_everyone()

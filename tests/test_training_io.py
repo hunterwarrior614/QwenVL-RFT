@@ -100,3 +100,11 @@ def test_estimate_total_training_steps_accounts_for_processes_and_accumulation()
         num_processes=4,
         gradient_accumulation_steps=1,
     ) == 500
+
+    assert estimate_total_training_steps(
+        num_batches=1000,
+        num_train_epochs=2,
+        num_processes=4,
+        gradient_accumulation_steps=4,
+        max_steps=20,
+    ) == 20

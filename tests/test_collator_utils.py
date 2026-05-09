@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 from src.qwen_vl_rl.collator_utils import (
     build_processor_inputs,
+    build_processor_inputs_with_padding_side,
     build_generation_prompt_texts,
     collect_prompt_metadata,
     decode_prompt_images,
@@ -124,6 +125,26 @@ def test_build_processor_inputs_forwards_expected_arguments():
         'padding': True,
         'return_tensors': 'pt',
     }
+
+
+def test_build_processor_inputs_with_padding_side_temporarily_switches_padding_side():
+    processor = FakeProcessor()
+    processor.tokenizer.padding_side = 'right'
+
+    inputs = build_processor_inputs_with_padding_side(
+        processor,
+        texts=['GEN: Question'],
+        images=['fake-image'],
+        padding_side='left',
+    )
+
+    assert inputs == {
+        'text': ['GEN: Question'],
+        'images': ['fake-image'],
+        'padding': True,
+        'return_tensors': 'pt',
+    }
+    assert processor.tokenizer.padding_side == 'right'
 
 
 def test_collect_prompt_metadata_collects_shared_fields():

@@ -38,6 +38,10 @@ def estimate_total_training_steps(
     gradient_accumulation_steps: int = 1,
     max_steps: int | None = None,
 ) -> int:
+    # 这里的 num_batches 传入的是“全局数据集按单卡 batch_size 切分后的 batch 数”。
+    # 在多卡 DDP 下，每个进程只会消费其中大约 1 / num_processes 的 batch，
+    # 因此这里先换算为单进程视角下的局部 batch 数，再除以梯度累积步数，
+    # 得到每个进程实际执行的 optimizer step 数。
     batches_per_process = math.ceil(num_batches / max(num_processes, 1))
     total_steps = max(
         1,

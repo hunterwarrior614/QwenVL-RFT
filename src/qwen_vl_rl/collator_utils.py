@@ -39,12 +39,31 @@ def decode_prompt_images(
 
 
 def build_processor_inputs(processor, texts: list[str], images: list[Any]):
-    return processor(
-        text=texts,
+    return build_processor_inputs_with_padding_side(
+        processor,
+        texts=texts,
         images=images,
-        padding=True,
-        return_tensors='pt',
+        padding_side=processor.tokenizer.padding_side,
     )
+
+
+def build_processor_inputs_with_padding_side(
+    processor,
+    texts: list[str],
+    images: list[Any],
+    padding_side: str,
+):
+    original_padding_side = processor.tokenizer.padding_side
+    processor.tokenizer.padding_side = padding_side
+    try:
+        return processor(
+            text=texts,
+            images=images,
+            padding=True,
+            return_tensors='pt',
+        )
+    finally:
+        processor.tokenizer.padding_side = original_padding_side
 
 
 def collect_prompt_metadata(batch: list[dict[str, Any]]) -> dict[str, list[Any]]:
