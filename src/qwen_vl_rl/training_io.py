@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 
@@ -28,6 +29,23 @@ def save_optimizer_and_training_state(
         json.dumps(training_state, ensure_ascii=False, indent=2),
         encoding='utf-8',
     )
+
+
+def estimate_total_training_steps(
+    num_batches: int,
+    num_train_epochs: int,
+    num_processes: int = 1,
+    gradient_accumulation_steps: int = 1,
+    max_steps: int | None = None,
+) -> int:
+    batches_per_process = math.ceil(num_batches / max(num_processes, 1))
+    total_steps = max(
+        1,
+        (batches_per_process * num_train_epochs) // max(gradient_accumulation_steps, 1),
+    )
+    if max_steps is not None:
+        total_steps = min(total_steps, max_steps)
+    return total_steps
 
 
 def log_metrics(

@@ -6,6 +6,7 @@ import torch
 
 from src.qwen_vl_rl.training_io import (
     append_metric,
+    estimate_total_training_steps,
     prepare_checkpoint_dir,
     save_optimizer_and_training_state,
 )
@@ -83,3 +84,19 @@ def test_resolve_object_paths_handles_required_and_optional_attrs(tmp_path: Path
     assert obj.base_model_name_or_path == str(project_root / '../Qwen/model')
     assert obj.output_dir == str(project_root / 'outputs/ppo/default')
     assert obj.sft_adapter_path is None
+
+
+def test_estimate_total_training_steps_accounts_for_processes_and_accumulation():
+    assert estimate_total_training_steps(
+        num_batches=1000,
+        num_train_epochs=2,
+        num_processes=4,
+        gradient_accumulation_steps=4,
+    ) == 125
+
+    assert estimate_total_training_steps(
+        num_batches=1000,
+        num_train_epochs=2,
+        num_processes=4,
+        gradient_accumulation_steps=1,
+    ) == 500

@@ -32,7 +32,11 @@ from src.qwen_vl_rl.modeling_common import (
 from src.qwen_vl_rl.reports import write_test_results_from_loader
 from src.qwen_vl_rl.answering import extract_choice_letter
 from src.qwen_vl_rl.sft import QwenVLSFTCollator, create_sft_datasets_from_ppo_records
-from src.qwen_vl_rl.training_io import prepare_checkpoint_dir, save_optimizer_and_training_state
+from src.qwen_vl_rl.training_io import (
+    estimate_total_training_steps,
+    prepare_checkpoint_dir,
+    save_optimizer_and_training_state,
+)
 from src.qwen_vl_rl.utils import (
     dump_json,
     ensure_dir,
@@ -291,13 +295,13 @@ def main() -> None:
         weight_decay=config['weight_decay'],
     )
 
-    total_steps = max(
-        1,
-        (len(train_loader) * config['num_train_epochs'])
-        // config['gradient_accumulation_steps'],
+    total_steps = estimate_total_training_steps(
+        num_batches=len(train_loader),
+        num_train_epochs=config['num_train_epochs'],
+        num_processes=accelerator.num_processes,
+        gradient_accumulation_steps=config['gradient_accumulation_steps'],
+        max_steps=args.max_steps,
     )
-    if args.max_steps is not None:
-        total_steps = args.max_steps
     warmup_steps = max(1, int(total_steps * config['warmup_ratio']))
     scheduler = get_cosine_schedule_with_warmup(
         optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps

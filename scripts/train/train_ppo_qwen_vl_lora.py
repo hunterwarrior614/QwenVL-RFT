@@ -26,6 +26,7 @@ from src.qwen_vl_rl.ppo import build_minibatch, compute_ppo_losses, generate_rol
 from src.qwen_vl_rl.reports import write_test_results_from_loader
 from src.qwen_vl_rl.training_io import (
     append_metric,
+    estimate_total_training_steps,
     log_metrics,
     prepare_checkpoint_dir,
     save_optimizer_and_training_state,
@@ -401,6 +402,12 @@ def main() -> None:
         weight_decay=config.optimizer.weight_decay,
     )
 
+    total_steps = estimate_total_training_steps(
+        num_batches=len(train_loader),
+        num_train_epochs=config.num_train_epochs,
+        num_processes=accelerator.num_processes,
+        max_steps=args.max_steps,
+    )
     policy, reference_model, optimizer, train_loader, valid_loader = accelerator.prepare(
         policy,
         reference_model,
@@ -409,9 +416,6 @@ def main() -> None:
         valid_loader,
     )
     reference_model.eval()
-    total_steps = len(train_loader) * config.num_train_epochs
-    if args.max_steps is not None:
-        total_steps = min(total_steps, args.max_steps)
     if accelerator.is_main_process:
         print(
             '[ppo/setup] '
