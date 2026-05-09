@@ -125,7 +125,7 @@ def run_evaluation(
         stats = accelerator.reduce(stats, reduction='sum')
 
     policy.train()
-    total_count = max(float(stats[3].item()), 1.0)
+    total_count = max(float(stats[4].item()), 1.0)
     reward_mean = float(stats[0].item() / total_count)
     return {
         'reward_mean': reward_mean,
