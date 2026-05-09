@@ -58,12 +58,16 @@ def summarize_rollout(rollout) -> dict[str, float]:
     valid_option_rate = sum(
         letter is not None for letter in rollout.pred_letters
     ) / max(len(rollout.pred_letters), 1)
+    accuracy = sum(
+        pred_letter == answer_key
+        for pred_letter, answer_key in zip(rollout.pred_letters, rollout.answer_keys)
+    ) / max(len(rollout.pred_letters), 1)
     kl_mean = (
         (rollout.old_logprobs - rollout.ref_logprobs) * rollout.response_mask
     ).sum() / rollout.response_mask.sum().clamp_min(1)
     return {
         'reward_mean': float(rollout.scores.mean().item()),
-        'accuracy': float(rollout.scores.mean().item()),
+        'accuracy': float(accuracy),
         'valid_option_rate': float(valid_option_rate),
         'response_length_mean': float(response_lengths.mean().item()),
         'kl_mean': float(kl_mean.item()),
@@ -86,6 +90,7 @@ def run_evaluation(
     reward_sum = 0.0
     length_sum = 0.0
     valid = 0
+    correct = 0
     total = 0
 
     for batch_index, batch in enumerate(valid_loader):
@@ -103,12 +108,16 @@ def run_evaluation(
         reward_sum += float(rollout.scores.sum().item())
         length_sum += float(rollout.response_mask.sum(dim=1).float().sum().item())
         valid += sum(letter is not None for letter in rollout.pred_letters)
+        correct += sum(
+            pred_letter == answer_key
+            for pred_letter, answer_key in zip(rollout.pred_letters, rollout.answer_keys)
+        )
         total += batch_count
         if max_batches is not None and batch_index + 1 >= max_batches:
             break
 
     stats = torch.tensor(
-        [reward_sum, length_sum, float(valid), float(total)],
+        [reward_sum, length_sum, float(valid), float(correct), float(total)],
         device=accelerator.device,
         dtype=torch.float64,
     )
@@ -120,7 +129,7 @@ def run_evaluation(
     reward_mean = float(stats[0].item() / total_count)
     return {
         'reward_mean': reward_mean,
-        'accuracy': reward_mean,
+        'accuracy': float(stats[3].item() / total_count),
         'valid_option_rate': float(stats[2].item() / total_count),
         'response_length_mean': float(stats[1].item() / total_count),
     }
