@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import re
 import sys
 
 import matplotlib.pyplot as plt
@@ -22,8 +23,14 @@ from src.qwen_vl_rl.config import load_config
 from src.qwen_vl_rl.data import QwenVLPPOCollator, create_split_datasets
 from src.qwen_vl_rl.modeling_ppo import build_policy_model, build_reference_model, save_policy_checkpoint
 from src.qwen_vl_rl.ppo import build_minibatch, compute_ppo_losses, generate_rollout_batch
-from src.qwen_vl_rl.reports import write_prediction_report_from_loader
-from src.qwen_vl_rl.utils import dump_json, ensure_dir, resolve_project_path, set_seed
+from src.qwen_vl_rl.reports import write_test_results_from_loader
+from src.qwen_vl_rl.training_io import (
+    append_metric,
+    log_metrics,
+    prepare_checkpoint_dir,
+    save_optimizer_and_training_state,
+)
+from src.qwen_vl_rl.utils import dump_json, ensure_dir, resolve_object_paths, resolve_project_path, set_seed
 
 
 def parse_args() -> argparse.Namespace:
@@ -34,8 +41,40 @@ def parse_args() -> argparse.Namespace:
         default='configs/ppo_qwen_vl_lora.yaml',
     )
     parser.add_argument('--max-steps', type=int, default=None, help='Optional cap on PPO prompt updates.')
-    parser.add_argument('--eval-only', action='store_true')
+    parser.add_argument('--test-only', action='store_true', help='Only run test split and write test_results.')
+    parser.add_argument(
+        '--policy-adapter-path',
+        type=str,
+        default=None,
+        help='Adapter path for evaluation. Accepts either an adapter dir or a checkpoint dir containing adapter/.',
+    )
     return parser.parse_args()
+
+
+def _normalize_adapter_path(path: Path) -> Path:
+    if path.is_dir() and (path / 'adapter').is_dir():
+        return path / 'adapter'
+    return path
+
+
+def resolve_test_policy_adapter_path(output_dir: Path, configured_sft_adapter_path: str | None, explicit_path: str | None) -> str | None:
+    if explicit_path:
+        return str(_normalize_adapter_path(Path(explicit_path).expanduser()).resolve())
+
+    checkpoint_adapters: list[tuple[int, str]] = []
+    for checkpoint_dir in output_dir.glob('checkpoint-*'):
+        match = re.fullmatch(r'checkpoint-(\d+)', checkpoint_dir.name)
+        adapter_dir = checkpoint_dir / 'adapter'
+        if match and adapter_dir.is_dir():
+            checkpoint_adapters.append((int(match.group(1)), str(adapter_dir.resolve())))
+
+    if checkpoint_adapters:
+        checkpoint_adapters.sort(key=lambda item: item[0])
+        return checkpoint_adapters[-1][1]
+
+    if configured_sft_adapter_path:
+        return str(_normalize_adapter_path(Path(configured_sft_adapter_path)).resolve())
+    return None
 
 
 def summarize_rollout(rollout) -> dict[str, float]:
@@ -108,14 +147,6 @@ def run_evaluation(
         'valid_option_rate': float(stats[2].item() / total_count),
         'response_length_mean': length_mean,
     }
-
-
-def append_metric(output_dir: Path, record: dict) -> None:
-    metrics_path = output_dir / 'metrics.jsonl'
-    with metrics_path.open('a', encoding='utf-8') as handle:
-        handle.write(json.dumps(record, ensure_ascii=False) + '\n')
-
-
 def render_training_curve(output_dir: Path) -> None:
     metrics_path = output_dir / 'metrics.jsonl'
     if not metrics_path.exists():
@@ -208,7 +239,7 @@ def save_checkpoint(policy, optimizer, output_dir: Path, step: int, config) -> N
     unwrapped = policy
     if hasattr(policy, 'module'):
         unwrapped = policy.module
-    checkpoint_dir = output_dir / f'checkpoint-{step}'
+    checkpoint_dir = prepare_checkpoint_dir(output_dir, step)
     save_policy_checkpoint(
         policy=unwrapped,
         output_dir=checkpoint_dir,
@@ -217,64 +248,57 @@ def save_checkpoint(policy, optimizer, output_dir: Path, step: int, config) -> N
             'base_model': config.model.base_model_name_or_path,
         },
     )
-    torch.save(optimizer.state_dict(), checkpoint_dir / 'optimizer.pt')
-    (checkpoint_dir / 'training_state.json').write_text(
-        json.dumps(
-            {
-                'step': step,
-                'base_model': config.model.base_model_name_or_path,
-                'output_dir': str(output_dir),
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding='utf-8',
+    save_optimizer_and_training_state(
+        optimizer=optimizer,
+        checkpoint_dir=checkpoint_dir,
+        training_state={
+            'step': step,
+            'base_model': config.model.base_model_name_or_path,
+            'output_dir': str(output_dir),
+        },
     )
-
-
-def log_metrics(
-    accelerator: Accelerator,
-    prefix: str,
-    metrics: dict[str, float],
-    total_steps: int | None = None,
-) -> None:
-    if accelerator.is_main_process:
-        step = metrics.get('step')
-        pieces = []
-        if step is not None and total_steps is not None:
-            pieces.append(f"step={int(step)}/{total_steps}")
-        for key, value in metrics.items():
-            if key in {'step', 'epoch', 'total_steps'}:
-                continue
-            if isinstance(value, (int, float)):
-                pieces.append(f'{key}={value:.4f}')
-        print(f'[{prefix}] ' + ' '.join(pieces), flush=True)
-
-
 def main() -> None:
     args = parse_args()
     config = load_config(args.config)
-    config.data.train_file = str(resolve_project_path(config.data.train_file, PROJECT_ROOT))
-    config.model.base_model_name_or_path = str(
-        resolve_project_path(config.model.base_model_name_or_path, PROJECT_ROOT)
+    resolve_object_paths(
+        config.data,
+        PROJECT_ROOT,
+        required_attrs=['train_file'],
     )
-    config.model.sft_adapter_path = (
-        str(resolve_project_path(config.model.sft_adapter_path, PROJECT_ROOT))
-        if config.model.sft_adapter_path
-        else None
+    resolve_object_paths(
+        config.model,
+        PROJECT_ROOT,
+        required_attrs=['base_model_name_or_path'],
+        optional_attrs=['sft_adapter_path'],
     )
-    config.logging.output_dir = str(resolve_project_path(config.logging.output_dir, PROJECT_ROOT))
+    resolve_object_paths(
+        config.logging,
+        PROJECT_ROOT,
+        required_attrs=['output_dir'],
+    )
     set_seed(config.seed)
 
     output_dir = ensure_dir(config.logging.output_dir)
+    if args.test_only:
+        config.model.sft_adapter_path = resolve_test_policy_adapter_path(
+            output_dir=output_dir,
+            configured_sft_adapter_path=config.model.sft_adapter_path,
+            explicit_path=args.policy_adapter_path,
+        )
+        if config.model.sft_adapter_path is None:
+            raise ValueError(
+                'No adapter available for test-only evaluation. '
+                'Pass --policy-adapter-path or train/save a PPO checkpoint first.'
+            )
 
     # 创建了一个 Accelerator 对象
     # 其作用是自动处理分布式训练（多 GPU、TPU、混合精度等），同时简化设备管理、梯度累积和混合精度训练等代码
     accelerator = Accelerator(gradient_accumulation_steps=1)
     if accelerator.is_main_process:
         dump_json(config.to_dict(), output_dir / 'resolved_config.json')
-        metrics_path = output_dir / 'metrics.jsonl'
-        metrics_path.write_text('', encoding='utf-8')   # 清空文件内容
+        if not args.test_only:
+            metrics_path = output_dir / 'metrics.jsonl'
+            metrics_path.write_text('', encoding='utf-8')   # 清空文件内容
     accelerator.wait_for_everyone()
 
     if accelerator.is_main_process:
@@ -309,6 +333,45 @@ def main() -> None:
         output_dir / 'dataset_split.json',
     )
 
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=config.ppo.per_device_prompt_batch_size,
+        shuffle=False,
+        collate_fn=collator,
+        num_workers=config.data.num_workers,
+        pin_memory=torch.cuda.is_available(),
+    )
+
+    if accelerator.is_main_process:
+        print('Loading policy and reference models...')
+        if args.test_only:
+            print(f'[ppo/test-only] loading adapter from {config.model.sft_adapter_path}')
+
+    # 获得策略网络 Actor
+    policy = build_policy_model(config.model, config.lora)
+
+    if args.test_only:
+        policy = accelerator.prepare(policy)
+        if accelerator.is_main_process:
+            test_output = write_test_results_from_loader(
+                policy=policy,
+                processor=processor,
+                loader=test_loader,
+                accelerator=accelerator,
+                max_new_tokens=config.generation.eval_max_new_tokens,
+                output_dir=output_dir,
+            )
+            print('Test metrics:', test_output['metrics'])
+            dump_json(
+                {
+                    'test_size': len(test_dataset),
+                    'test_metrics': test_output['metrics'],
+                    'test_results': test_output['paths'],
+                },
+                output_dir / 'test_summary.json',
+            )
+        return
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=config.ppo.per_device_prompt_batch_size,
@@ -325,20 +388,6 @@ def main() -> None:
         num_workers=config.data.num_workers,
         pin_memory=torch.cuda.is_available(),
     )
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=config.ppo.per_device_prompt_batch_size,
-        shuffle=False,
-        collate_fn=collator,
-        num_workers=config.data.num_workers,
-        pin_memory=torch.cuda.is_available(),
-    )
-
-    if accelerator.is_main_process:
-        print('Loading policy and reference models...')
-
-    # 获得策略网络 Actor
-    policy = build_policy_model(config.model, config.lora)
 
     # Reference Model（参考模型） 是一个参数被冻结的、与策略模型结构相同的模型，
     # 主要用于计算 KL 散度惩罚项，防止策略模型在优化过程中过度偏离原始行为（例如语言生成风格或事实性）
@@ -376,48 +425,6 @@ def main() -> None:
             f'process_index={accelerator.process_index}',
             flush=True,
         )
-
-    if args.eval_only:
-        metrics = run_evaluation(
-            policy=policy,
-            reference_model=reference_model,
-            processor=processor,
-            valid_loader=valid_loader,
-            config=config,
-            accelerator=accelerator,
-            max_batches=args.max_steps,
-        )
-        if accelerator.is_main_process:
-            report_paths = write_prediction_report_from_loader(
-                policy=policy,
-                processor=processor,
-                loader=test_loader,
-                accelerator=accelerator,
-                max_new_tokens=config.generation.eval_max_new_tokens,
-                output_dir=output_dir,
-            )
-            append_metric(
-                output_dir,
-                {
-                    'phase': 'eval',
-                    'step': 0,
-                    'epoch': -1,
-                    'total_steps': total_steps,
-                    **metrics,
-                },
-            )
-            print('Eval metrics:', metrics)
-            dump_json(
-                {
-                    'test_size': len(test_dataset),
-                    'global_step': 0,
-                    'total_steps': total_steps,
-                    'final_eval': metrics,
-                    'test_results': report_paths,
-                },
-                output_dir / 'test_summary.json',
-            )
-        return
 
     global_step = 0
     for epoch in range(config.num_train_epochs):
@@ -520,7 +527,7 @@ def main() -> None:
         final_eval['step'] = float(global_step)
         final_eval['epoch'] = float(config.num_train_epochs - 1)
         final_eval['total_steps'] = float(total_steps)
-        report_paths = write_prediction_report_from_loader(
+        test_output = write_test_results_from_loader(
             policy=policy,
             processor=processor,
             loader=test_loader,
@@ -542,7 +549,8 @@ def main() -> None:
                 'global_step': global_step,
                 'total_steps': total_steps,
                 'final_eval': final_eval,
-                'test_results': report_paths,
+                'test_metrics': test_output['metrics'],
+                'test_results': test_output['paths'],
             },
             output_dir / 'train_summary.json',
         )

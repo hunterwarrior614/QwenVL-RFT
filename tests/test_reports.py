@@ -3,8 +3,10 @@ import json
 import torch
 
 from src.qwen_vl_rl.reports import (
+    _extract_target,
     extract_first_image_uri,
     generate_prediction_records,
+    summarize_prediction_records,
     write_prediction_report,
 )
 
@@ -121,3 +123,79 @@ def test_generate_prediction_records_from_loader():
             'image': 'data:image/png;base64,abc',
         }
     ]
+    assert summarize_prediction_records(records) == {
+        'total': 1.0,
+        'correct': 1.0,
+        'accuracy': 1.0,
+        'valid_option_rate': 1.0,
+    }
+
+
+def test_generate_prediction_records_marks_plain_choice_as_invalid():
+    class FakeAccelerator:
+        device = torch.device('cpu')
+
+        def unwrap_model(self, model):
+            return model
+
+    class FakeTokenizer:
+        pad_token_id = 0
+        eos_token_id = 2
+
+        def decode(self, tokens, skip_special_tokens=True):
+            return 'B'
+
+    class FakeProcessor:
+        tokenizer = FakeTokenizer()
+
+    class FakePolicy(torch.nn.Module):
+        def generate(self, **kwargs):
+            input_ids = kwargs['input_ids']
+            response = torch.tensor([[101]], dtype=input_ids.dtype)
+            return torch.cat([input_ids, response], dim=1)
+
+    loader = [
+        {
+            'prompt_inputs': {
+                'input_ids': torch.tensor([[11, 12]]),
+                'attention_mask': torch.tensor([[1, 1]]),
+            },
+            'sample_ids': [9],
+            'prompt_texts': ['prompt text'],
+            'questions': ['Q?'],
+            'answer_keys': ['B'],
+            'ground_truths': ['B'],
+            'messages': [[
+                {
+                    'role': 'user',
+                    'content': [
+                        {'type': 'image', 'image': 'data:image/png;base64,abc'},
+                    ],
+                }
+            ]],
+        }
+    ]
+
+    records = generate_prediction_records(
+        policy=FakePolicy(),
+        processor=FakeProcessor(),
+        loader=loader,
+        accelerator=FakeAccelerator(),
+        max_new_tokens=1,
+    )
+
+    assert records[0]['raw_response'] == 'B'
+    assert records[0]['pred_letter'] is None
+    assert records[0]['correct'] is False
+
+
+def test_extract_target_uses_strict_answer_tag_parsing_for_target_texts():
+    answer_key, ground_truth = _extract_target(
+        {
+            'target_texts': ['<answer>C</answer>'],
+        },
+        0,
+    )
+
+    assert answer_key == 'C'
+    assert ground_truth == '<answer>C</answer>'

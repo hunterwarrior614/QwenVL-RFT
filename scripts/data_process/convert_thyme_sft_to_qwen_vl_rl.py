@@ -6,12 +6,17 @@ import argparse
 import json
 import re
 from pathlib import Path
+import sys
 from typing import Iterable
 
 import pyarrow.parquet as pq
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.qwen_vl_rl.answering import extract_choice_letter as extract_choice_letter_from_text
+
 DEFAULT_OUTPUT_DIR = Path("data")
 DEFAULT_INPUT_PATH = Path("../Thyme-SFT/data/wo_thinking_thyme_single_round-00000-of-00146.parquet")
 
@@ -19,12 +24,15 @@ DEFAULT_INPUT_PATH = Path("../Thyme-SFT/data/wo_thinking_thyme_single_round-0000
 THINK_PATTERN = re.compile(r"<think>(.*?)</think>", re.IGNORECASE | re.DOTALL)
 ANSWER_PATTERN = re.compile(r"<answer>(.*?)</answer>", re.IGNORECASE | re.DOTALL)
 TAG_PATTERN = re.compile(r"</?[^>]+>")
-CHOICE_PATTERN = re.compile(r"^\s*([A-D])(?:[\)\].:\s]|$)", re.IGNORECASE)
 QUESTION_CUTOFF_PATTERNS = (
     re.compile(r"\n###\s*User Image Path", re.IGNORECASE),
     re.compile(r"\n###\s*User Image Size", re.IGNORECASE),
     re.compile(r"\n###\s*\*\*Output Format", re.IGNORECASE),
     re.compile(r"\n###\s*Output Format", re.IGNORECASE),
+)
+ANSWER_FORMAT_PROMPT = (
+    "\n\n### Output Format\n"
+    "<answer>Your final answer to the user's question goes here.</answer>"
 )
 
 
@@ -120,6 +128,13 @@ def clean_question(question: str | None) -> str:
     return normalize_text(text)
 
 
+def build_prompt_question(question: str) -> str:
+    question = clean_question(question)
+    if not question:
+        return ANSWER_FORMAT_PROMPT.strip()
+    return f"{question}{ANSWER_FORMAT_PROMPT}"
+
+
 def extract_reasoning(response: str | None) -> str:
     if not response:
         return ""
@@ -151,13 +166,14 @@ def normalize_answer(answer: str) -> str:
 
 
 def extract_choice_letter(answer: str) -> str | None:
-    match = CHOICE_PATTERN.match(answer or "")
-    if match:
-        return match.group(1).upper()
+    normalized = normalize_text(answer or "")
+    choice = extract_choice_letter_from_text(normalized, require_answer_tag=False)
+    if choice:
+        return choice
 
-    compact = normalize_text(answer)
-    if compact.upper() in {"A", "B", "C", "D"}:
-        return compact.upper()
+    compact = normalized.upper()
+    if compact in {"A", "B", "C", "D"}:
+        return compact
     return None
 
 
@@ -222,14 +238,16 @@ def build_common_fields(
     source_images = select_images(raw_image, "all")
     kept_images = select_images(raw_image, image_mode)
     question = clean_question(raw_question)
+    prompt_question = build_prompt_question(raw_question)
     answer = extract_answer(raw_response)
     answer_normalized = normalize_answer(answer)
     choice_letter = extract_choice_letter(answer)
-    messages = build_qwen_messages(question, kept_images, image_format)
+    messages = build_qwen_messages(prompt_question, kept_images, image_format)
 
     record = {
         "id": row_id,
-        "question": question,
+        "question": prompt_question,
+        "base_question": question,
         "messages": messages,
         "ground_truth": answer,
         "answer": answer,
@@ -260,6 +278,7 @@ def build_ppo_record(common: dict) -> dict:
         "id": common["id"],
         "messages": common["messages"],
         "question": common["question"],
+        "base_question": common["base_question"],
         "ground_truth": common["ground_truth"],
         "reference_answer": common["answer"],
         "answer_normalized": common["answer_normalized"],
@@ -282,6 +301,7 @@ def build_grpo_record(common: dict) -> dict:
         "id": common["id"],
         "prompt": common["messages"],
         "question": common["question"],
+        "base_question": common["base_question"],
         "ground_truth": common["ground_truth"],
         "answer_normalized": common["answer_normalized"],
         "choice_letter": common["choice_letter"],

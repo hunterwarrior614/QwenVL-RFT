@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-import re
 from typing import Any
 
 import torch
@@ -10,30 +9,16 @@ import torch.nn as nn
 from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
 from transformers import BitsAndBytesConfig, Qwen2_5_VLForConditionalGeneration
 
-
-def get_torch_dtype(dtype_name: str) -> torch.dtype:
-    mapping = {
-        'float16': torch.float16,
-        'fp16': torch.float16,
-        'bfloat16': torch.bfloat16,
-        'bf16': torch.bfloat16,
-        'float32': torch.float32,
-        'fp32': torch.float32,
-    }
-    if dtype_name not in mapping:
-        raise ValueError(f'Unsupported torch dtype: {dtype_name}')
-    return mapping[dtype_name]
+from .modeling_common import (
+    build_quantization_config_from_fields,
+    get_torch_dtype,
+    match_module_names,
+    resolve_lora_target_modules,
+)
 
 
 def build_quantization_config(model_config) -> BitsAndBytesConfig | None:
-    if not model_config.load_in_4bit:
-        return None
-    return BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type=model_config.bnb_4bit_quant_type,
-        bnb_4bit_use_double_quant=model_config.bnb_4bit_use_double_quant,
-        bnb_4bit_compute_dtype=get_torch_dtype(model_config.bnb_4bit_compute_dtype),
-    )
+    return build_quantization_config_from_fields(model_config)
 
 
 # 为 PPO 训练设计的策略网络包装类
@@ -225,14 +210,8 @@ def _get_model_dtype(model: nn.Module) -> torch.dtype:
 
 
 def _resolve_lora_target_modules(model: nn.Module, target_regex: str) -> list[str]:
-    matched = _match_module_names(model, target_regex)
-    if not matched and '\\\\' in target_regex:
-        matched = _match_module_names(model, bytes(target_regex, 'utf-8').decode('unicode_escape'))
-    if not matched:
-        raise ValueError(f'No LoRA target modules matched regex: {target_regex}')
-    return matched
+    return resolve_lora_target_modules(model, target_regex)
 
 
 def _match_module_names(model: nn.Module, target_regex: str) -> list[str]:
-    pattern = re.compile(target_regex)
-    return [name for name, _ in model.named_modules() if pattern.fullmatch(name)]
+    return match_module_names(model, target_regex)

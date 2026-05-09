@@ -33,6 +33,7 @@
 - 任务类型：单图、多选视觉问答
 - `choice_letter` 覆盖率：`100%`
 - 训练目标可以直接做 `<answer>A</answer>` 格式下的 `A/B/C/D` exact match
+- RL 数据里的 `question/messages/prompt` 已附带 `### Output Format` 约束，`base_question` 保留原始题干
 
 两份 RL 数据的区别：
 
@@ -166,12 +167,19 @@ PPO / GRPO 的 `model.sft_adapter_path` 要先指向你要接续的 SFT checkpoi
 - `outputs/grpo/<run_name>/test_results.html`
 - `outputs/grpo/<run_name>/test_results.jsonl`
 
-PPO / GRPO 还支持只跑评估，并会生成同样的测试集逐样本报告：
+PPO / GRPO 还支持只跑测试集，并会生成同样的测试集逐样本报告：
 
 ```bash
-python scripts/train/train_ppo_qwen_vl_lora.py --config configs/ppo_qwen_vl_lora.yaml --eval-only
-python scripts/train/train_grpo_qwen_vl_lora.py --config configs/grpo_qwen_vl_lora.yaml --eval-only
+python scripts/train/train_ppo_qwen_vl_lora.py --config configs/ppo_qwen_vl_lora.yaml --test-only
+python scripts/train/train_grpo_qwen_vl_lora.py --config configs/grpo_qwen_vl_lora.yaml --test-only
 ```
+
+说明：
+
+- `PPO --test-only` 会优先加载 `outputs/ppo/<run_name>/checkpoint-*/adapter` 中最新的 PPO checkpoint
+- 如果你想显式指定评测所用的 PPO adapter，可以额外传：
+  `--policy-adapter-path <checkpoint_dir_or_adapter_dir>`
+- `GRPO --test-only` 仍按照配置文件中的 `model.sft_adapter_path` / 当前训练入口加载策略
 
 训练效果主要看：
 
@@ -181,6 +189,8 @@ python scripts/train/train_grpo_qwen_vl_lora.py --config configs/grpo_qwen_vl_lo
 
 说明：配置里的 `eval_size` 指 validation split；测试集只用于最终逐样本报告。
 报告中的 `raw_response` 是模型原始 decoded response，`prediction` 是去掉首尾空白后的版本。
+数据转换脚本、SFT / PPO / GRPO 训练脚本当前都支持直接使用
+`python scripts/...py` 的方式从项目根目录启动。
 
 ## 9. 当前默认配置
 

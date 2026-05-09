@@ -41,3 +41,13 @@ def test_score_choice_predictions_uses_strict_extraction():
 
     assert output['pred_letters'] == ['A', None, 'C']
     assert output['rewards'] == [1.0, 0.0, 0.0]
+
+
+def test_score_choice_predictions_rejects_plain_choice_letters_without_tags():
+    output = score_choice_predictions(
+        ['A', 'B', 'C'],
+        ['A', 'B', 'D'],
+    )
+
+    assert output['pred_letters'] == [None, None, None]
+    assert output['rewards'] == [0.0, 0.0, 0.0]

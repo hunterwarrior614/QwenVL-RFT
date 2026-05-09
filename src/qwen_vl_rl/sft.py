@@ -6,7 +6,13 @@ from typing import Any
 
 from torch.utils.data import Dataset
 
-from .data import decode_data_uri_image, resize_image_longest_edge
+from .collator_utils import (
+    build_processor_inputs,
+    build_generation_prompt_texts,
+    collect_prompt_metadata,
+    decode_prompt_images,
+    prepare_tokenizer_for_padding,
+)
 
 
 @dataclass
@@ -38,29 +44,19 @@ class QwenVLSFTCollator:
     def __init__(self, processor, image_max_longest_edge: int | None = None):
         self.processor = processor
         self.image_max_longest_edge = image_max_longest_edge
-        self.processor.tokenizer.padding_side = 'right'
-        if self.processor.tokenizer.pad_token is None:
-            self.processor.tokenizer.pad_token = self.processor.tokenizer.eos_token
-        self.processor.tokenizer.pad_token_id = self.processor.tokenizer.convert_tokens_to_ids(
-            self.processor.tokenizer.pad_token
-        )
+        prepare_tokenizer_for_padding(self.processor, padding_side='right')
 
     def __call__(self, batch: list[dict[str, Any]]) -> dict[str, Any]:
-        prompt_texts = []
-        prompt_images = []
+        prompt_texts = build_generation_prompt_texts(self.processor, batch)
+        prompt_images = decode_prompt_images(
+            batch,
+            image_max_longest_edge=self.image_max_longest_edge,
+        )
         full_texts = []
-        sample_ids = []
-        questions = []
+        metadata = collect_prompt_metadata(batch)
         target_texts = []
 
         for sample in batch:
-            prompt_texts.append(
-                self.processor.apply_chat_template(
-                    sample['messages'],
-                    tokenize=False,
-                    add_generation_prompt=True,
-                )
-            )
             full_messages = copy.deepcopy(sample['messages'])
             full_messages.append(
                 {
@@ -80,28 +76,10 @@ class QwenVLSFTCollator:
                     add_generation_prompt=False,
                 )
             )
-            prompt_images.append(
-                _decode_first_image(
-                    sample['messages'],
-                    image_max_longest_edge=self.image_max_longest_edge,
-                )
-            )
-            sample_ids.append(sample['sample_id'])
-            questions.append(sample['question'])
             target_texts.append(sample['target_text'])
 
-        model_inputs = self.processor(
-            text=full_texts,
-            images=prompt_images,
-            padding=True,
-            return_tensors='pt',
-        )
-        prompt_inputs = self.processor(
-            text=prompt_texts,
-            images=prompt_images,
-            padding=True,
-            return_tensors='pt',
-        )
+        model_inputs = build_processor_inputs(self.processor, full_texts, prompt_images)
+        prompt_inputs = build_processor_inputs(self.processor, prompt_texts, prompt_images)
 
         labels = model_inputs['input_ids'].clone()
         labels[labels == self.processor.tokenizer.pad_token_id] = -100
@@ -111,9 +89,9 @@ class QwenVLSFTCollator:
 
         model_inputs['labels'] = labels
         return {
-            'sample_ids': sample_ids,
-            'messages': [copy.deepcopy(sample['messages']) for sample in batch],
-            'questions': questions,
+            'sample_ids': metadata['sample_ids'],
+            'messages': [copy.deepcopy(messages) for messages in metadata['messages']],
+            'questions': metadata['questions'],
             'prompt_texts': prompt_texts,
             'model_inputs': model_inputs,
             'prompt_inputs': prompt_inputs,
@@ -159,17 +137,3 @@ def _convert_records(records) -> list[SFTRecord]:
         )
         for record in records
     ]
-
-
-def _decode_first_image(
-    messages: list[dict[str, Any]],
-    image_max_longest_edge: int | None = None,
-):
-    for message in messages:
-        for item in message.get('content', []):
-            if item.get('type') == 'image':
-                return resize_image_longest_edge(
-                    decode_data_uri_image(item['image']),
-                    image_max_longest_edge=image_max_longest_edge,
-                )
-    raise ValueError('No image found in sample messages')

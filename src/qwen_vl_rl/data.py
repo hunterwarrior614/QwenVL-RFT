@@ -1,16 +1,21 @@
 from __future__ import annotations
 
-import base64
 import copy
 import json
 import random
 from dataclasses import dataclass
-from io import BytesIO
 from pathlib import Path
 from typing import Any
 
-from PIL import Image
 from torch.utils.data import Dataset
+
+from .collator_utils import (
+    build_processor_inputs,
+    build_generation_prompt_texts,
+    collect_prompt_metadata,
+    decode_prompt_images,
+    prepare_tokenizer_for_padding,
+)
 
 
 @dataclass
@@ -81,55 +86,29 @@ class QwenVLPPOCollator:
         self.image_max_longest_edge = image_max_longest_edge
 
         # 生成任务中，需要将不同长度的 prompt 在左侧补齐，这样可以保证生成时新 token 追加在右侧，且 attention mask 计算正确
-        self.processor.tokenizer.padding_side = 'left'
-
-        # 如果 tokenizer 没有 pad_token，则使用 eos_token（[EOS]，End Of Sequence）作为 pad_token
-        if self.processor.tokenizer.pad_token is None:
-            self.processor.tokenizer.pad_token = self.processor.tokenizer.eos_token
-
-        self.processor.tokenizer.pad_token_id = self.processor.tokenizer.convert_tokens_to_ids(
-            self.processor.tokenizer.pad_token
-        )
+        prepare_tokenizer_for_padding(self.processor, padding_side='left')
 
     def __call__(self, batch: list[dict[str, Any]]) -> dict[str, Any]:
-        prompt_texts = []
-        prompt_images = []
-        sample_ids = []
+        prompt_texts = build_generation_prompt_texts(self.processor, batch)
+        prompt_images = decode_prompt_images(
+            batch,
+            image_max_longest_edge=self.image_max_longest_edge,
+        )
+        metadata = collect_prompt_metadata(batch)
         answer_keys = []
-        questions = []
         ground_truths = []
 
         for sample in batch:
-            prompt_texts.append(
-                self.processor.apply_chat_template(
-                    sample['messages'],
-                    tokenize=False,
-                    add_generation_prompt=True,
-                )
-            )
-            prompt_images.append(
-                _decode_first_image(
-                    sample['messages'],
-                    image_max_longest_edge=self.image_max_longest_edge,
-                )
-            )
-            sample_ids.append(sample['sample_id'])
             answer_keys.append(sample['choice_letter'])
-            questions.append(sample['question'])
             ground_truths.append(sample.get('ground_truth', sample['choice_letter']))
 
-        inputs = self.processor(
-            text=prompt_texts,
-            images=prompt_images,
-            padding=True,
-            return_tensors='pt',
-        )
+        inputs = build_processor_inputs(self.processor, prompt_texts, prompt_images)
         return {
-            'sample_ids': sample_ids,
+            'sample_ids': metadata['sample_ids'],
             'answer_keys': answer_keys,
-            'questions': questions,
+            'questions': metadata['questions'],
             'ground_truths': ground_truths,
-            'messages': [copy.deepcopy(sample['messages']) for sample in batch],
+            'messages': [copy.deepcopy(messages) for messages in metadata['messages']],
             'prompt_texts': prompt_texts,
             'prompt_images': prompt_images,
             'prompt_inputs': inputs,
@@ -286,46 +265,3 @@ def create_grpo_split_datasets(
         ThymeVLGRPOJsonlDataset(eval_records),
         ThymeVLGRPOJsonlDataset(test_records),
     )
-
-
-def _decode_first_image(
-    messages: list[dict[str, Any]],
-    image_max_longest_edge: int | None = None,
-) -> Image.Image:
-    for message in messages:
-        for item in message.get('content', []):
-            if item.get('type') == 'image':
-                return resize_image_longest_edge(
-                    decode_data_uri_image(item['image']),
-                    image_max_longest_edge=image_max_longest_edge,
-                )
-    raise ValueError('No image found in sample messages')
-
-
-def decode_data_uri_image(image_uri: str) -> Image.Image:
-    encoded = image_uri.split(',', 1)[1] if image_uri.startswith('data:image') else image_uri
-    image_bytes = base64.b64decode(encoded)
-    image = Image.open(BytesIO(image_bytes))
-    return image.convert('RGB')
-
-
-def resize_image_longest_edge(
-    image: Image.Image,
-    image_max_longest_edge: int | None = None,
-) -> Image.Image:
-    if image_max_longest_edge is None:
-        return image
-
-    width, height = image.size
-    longest_edge = max(width, height)
-    if longest_edge <= image_max_longest_edge:
-        return image
-
-    scale = image_max_longest_edge / float(longest_edge)
-    new_size = (
-        max(1, int(round(width * scale))),
-        max(1, int(round(height * scale))),
-    )
-
-    # 使用 Lanczos 算法将 image 缩放到 new_size
-    return image.resize(new_size, Image.Resampling.LANCZOS)

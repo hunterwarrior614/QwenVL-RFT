@@ -16,7 +16,6 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from transformers import (
     AutoProcessor,
-    BitsAndBytesConfig,
     Qwen2_5_VLForConditionalGeneration,
     get_cosine_schedule_with_warmup,
 )
@@ -25,11 +24,23 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.qwen_vl_rl.modeling_ppo import get_torch_dtype
-from src.qwen_vl_rl.reports import write_prediction_report_from_loader
-from src.qwen_vl_rl.reward import extract_choice_letter
+from src.qwen_vl_rl.modeling_common import (
+    build_quantization_config_from_fields,
+    get_torch_dtype,
+    resolve_lora_target_modules,
+)
+from src.qwen_vl_rl.reports import write_test_results_from_loader
+from src.qwen_vl_rl.answering import extract_choice_letter
 from src.qwen_vl_rl.sft import QwenVLSFTCollator, create_sft_datasets_from_ppo_records
-from src.qwen_vl_rl.utils import dump_json, ensure_dir, resolve_project_path, set_seed
+from src.qwen_vl_rl.training_io import prepare_checkpoint_dir, save_optimizer_and_training_state
+from src.qwen_vl_rl.utils import (
+    dump_json,
+    ensure_dir,
+    move_tensors_to_device,
+    resolve_config_paths_in_dict,
+    resolve_project_path,
+    set_seed,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -49,43 +60,19 @@ def load_config(path: str) -> dict:
     config_path = resolve_project_path(path, PROJECT_ROOT)
     with open(config_path, 'r', encoding='utf-8') as handle:
         config = yaml.safe_load(handle)
-    config['output_dir'] = str(resolve_project_path(config['output_dir'], PROJECT_ROOT))
-    config['base_model_name_or_path'] = str(
-        resolve_project_path(config['base_model_name_or_path'], PROJECT_ROOT)
+    return resolve_config_paths_in_dict(
+        config,
+        PROJECT_ROOT,
+        required_keys=['output_dir', 'base_model_name_or_path', 'train_file'],
     )
-    config['train_file'] = str(resolve_project_path(config['train_file'], PROJECT_ROOT))
-    return config
 
 
 def build_quantization_config(config: dict) -> BitsAndBytesConfig | None:
-    if not config.get('load_in_4bit', False):
-        return None
-    return BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type=config['bnb_4bit_quant_type'],
-        bnb_4bit_use_double_quant=config['bnb_4bit_use_double_quant'],
-        bnb_4bit_compute_dtype=get_torch_dtype(config['bnb_4bit_compute_dtype']),
-    )
+    return build_quantization_config_from_fields(config)
 
 
 def resolve_lora_targets(model, target_regex: str) -> list[str]:
-    import re
-
-    pattern = re.compile(target_regex)
-    matches = [name for name, _ in model.named_modules() if pattern.fullmatch(name)]
-    if not matches and '\\' in target_regex:
-        pattern = re.compile(bytes(target_regex, 'utf-8').decode('unicode_escape'))
-        matches = [name for name, _ in model.named_modules() if pattern.fullmatch(name)]
-    if not matches:
-        raise ValueError(f'No LoRA target modules matched regex: {target_regex}')
-    return matches
-
-
-def move_to_device(batch: dict, device: torch.device) -> dict:
-    return {
-        key: value.to(device) if torch.is_tensor(value) else value
-        for key, value in batch.items()
-    }
+    return resolve_lora_target_modules(model, target_regex)
 
 
 @torch.no_grad()
@@ -102,11 +89,11 @@ def evaluate(
     exact = 0
     total = 0
     for batch_index, batch in enumerate(valid_loader):
-        model_inputs = move_to_device(batch['model_inputs'], accelerator.device)
+        model_inputs = move_tensors_to_device(batch['model_inputs'], accelerator.device)
         outputs = policy(**model_inputs)
         losses.append(float(outputs.loss.detach().float().item()))
 
-        prompt_inputs = move_to_device(batch['prompt_inputs'], accelerator.device)
+        prompt_inputs = move_tensors_to_device(batch['prompt_inputs'], accelerator.device)
         generated = accelerator.unwrap_model(policy).generate(
             input_ids=prompt_inputs['input_ids'],
             attention_mask=prompt_inputs['attention_mask'],
@@ -122,8 +109,8 @@ def evaluate(
             prediction = processor.tokenizer.decode(
                 generated[row_idx, prompt_length:], skip_special_tokens=True
             ).strip()
-            pred_letter = extract_choice_letter(prediction)
-            target_letter = extract_choice_letter(target)
+            pred_letter = extract_choice_letter(prediction, require_answer_tag=True)
+            target_letter = extract_choice_letter(target, require_answer_tag=True)
             exact += int(pred_letter == target_letter)
             total += 1
 
@@ -146,14 +133,13 @@ def evaluate(
 
 
 def save_checkpoint(model, processor, optimizer, output_dir: Path, step: int) -> None:
-    checkpoint_dir = output_dir / f'checkpoint-{step}'
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_dir = prepare_checkpoint_dir(output_dir, step)
     model.save_pretrained(checkpoint_dir / 'adapter')
     processor.save_pretrained(checkpoint_dir / 'processor')
-    torch.save(optimizer.state_dict(), checkpoint_dir / 'optimizer.pt')
-    (checkpoint_dir / 'training_state.json').write_text(
-        json.dumps({'step': step}, ensure_ascii=False, indent=2),
-        encoding='utf-8',
+    save_optimizer_and_training_state(
+        optimizer=optimizer,
+        checkpoint_dir=checkpoint_dir,
+        training_state={'step': step},
     )
 
 
@@ -344,7 +330,7 @@ def main() -> None:
         model.train()
         for batch in train_loader:
             with accelerator.accumulate(model):
-                model_inputs = move_to_device(batch['model_inputs'], accelerator.device)
+                model_inputs = move_tensors_to_device(batch['model_inputs'], accelerator.device)
                 outputs = model(**model_inputs)
                 loss = outputs.loss
                 accelerator.backward(loss)
@@ -429,7 +415,7 @@ def main() -> None:
         max_new_tokens=config['max_new_tokens_eval'],
     )
     if accelerator.is_main_process:
-        report_paths = write_prediction_report_from_loader(
+        test_output = write_test_results_from_loader(
             policy=model,
             processor=processor,
             loader=test_loader,
@@ -467,7 +453,8 @@ def main() -> None:
                 'global_step': global_step,
                 'total_steps': total_steps,
                 'final_eval': final_metrics,
-                'test_results': report_paths,
+                'test_metrics': test_output['metrics'],
+                'test_results': test_output['paths'],
             },
             output_dir / 'train_summary.json',
         )

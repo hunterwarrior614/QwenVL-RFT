@@ -7,15 +7,8 @@ from typing import Any
 
 import torch
 
-from .reward import extract_choice_letter
-
-
-def extract_first_image_uri(messages: list[dict[str, Any]]) -> str:
-    for message in messages:
-        for item in message.get('content', []):
-            if item.get('type') == 'image':
-                return item.get('image', '')
-    return ''
+from .answering import extract_choice_letter
+from .utils import extract_first_image_uri, move_tensors_to_device
 
 
 @torch.no_grad()
@@ -32,7 +25,7 @@ def generate_prediction_records(
 
     records: list[dict[str, Any]] = []
     for batch in loader:
-        prompt_inputs = _move_tensors_to_device(batch['prompt_inputs'], accelerator.device)
+        prompt_inputs = move_tensors_to_device(batch['prompt_inputs'], accelerator.device)
         generated = model.generate(
             **prompt_inputs,
             max_new_tokens=max_new_tokens,
@@ -51,7 +44,7 @@ def generate_prediction_records(
             )
             prediction = raw_response.strip()
             answer_key, ground_truth = _extract_target(batch, row_idx)
-            pred_letter = extract_choice_letter(raw_response)
+            pred_letter = extract_choice_letter(raw_response, require_answer_tag=True)
             records.append(
                 {
                     'sample_id': int(sample_id),
@@ -72,7 +65,7 @@ def generate_prediction_records(
     return records
 
 
-def write_prediction_report_from_loader(
+def write_test_results_from_loader(
     policy,
     processor,
     loader,
@@ -80,7 +73,7 @@ def write_prediction_report_from_loader(
     max_new_tokens: int,
     output_dir: str | Path,
     name: str = 'test_results',
-) -> dict[str, str]:
+) -> dict[str, Any]:
     records = generate_prediction_records(
         policy=policy,
         processor=processor,
@@ -88,7 +81,22 @@ def write_prediction_report_from_loader(
         accelerator=accelerator,
         max_new_tokens=max_new_tokens,
     )
-    return write_prediction_report(records, output_dir=output_dir, name=name)
+    return {
+        'paths': write_prediction_report(records, output_dir=output_dir, name=name),
+        'metrics': summarize_prediction_records(records),
+    }
+
+
+def summarize_prediction_records(records: list[dict[str, Any]]) -> dict[str, float]:
+    total = len(records)
+    correct = sum(1 for record in records if record.get('correct'))
+    valid = sum(1 for record in records if record.get('pred_letter') is not None)
+    return {
+        'total': float(total),
+        'correct': float(correct),
+        'accuracy': float(correct / max(total, 1)),
+        'valid_option_rate': float(valid / max(total, 1)),
+    }
 
 
 def write_prediction_report(records: list[dict[str, Any]], output_dir: str | Path, name: str) -> dict[str, str]:
@@ -260,17 +268,10 @@ def _render_record(record: dict[str, Any]) -> str:
 </article>'''
 
 
-def _move_tensors_to_device(batch: dict[str, Any], device: torch.device) -> dict[str, Any]:
-    return {
-        key: value.to(device) if torch.is_tensor(value) else value
-        for key, value in batch.items()
-    }
-
-
 def _extract_target(batch: dict[str, Any], row_idx: int) -> tuple[str | None, str]:
     if 'target_texts' in batch:
         ground_truth = batch['target_texts'][row_idx]
-        return extract_choice_letter(ground_truth), ground_truth
+        return extract_choice_letter(ground_truth, require_answer_tag=True), ground_truth
 
     answer_key = _get_optional_list_value(batch, 'answer_keys', row_idx, None)
     ground_truth = _get_optional_list_value(batch, 'ground_truths', row_idx, answer_key or '')

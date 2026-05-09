@@ -1,25 +1,12 @@
 from __future__ import annotations
 
-import re
 from typing import Iterable
 
-ANSWER_TAG_PATTERN = re.compile(r'<answer>(.*?)</answer>', re.IGNORECASE | re.DOTALL)
-EXACT_CHOICE_PATTERN = re.compile(r'^\s*([A-Da-d])\s*(?:[\)\].:：、-]\s*)?$')
+from .answering import extract_choice_letter as _extract_choice_letter
 
 
 def extract_choice_letter(text: str) -> str | None:
-    if not text:
-        return None
-
-    match = ANSWER_TAG_PATTERN.search(text)
-    if not match:
-        return None
-
-    answer_text = match.group(1).strip()
-    choice_match = EXACT_CHOICE_PATTERN.fullmatch(answer_text)
-    if choice_match:
-        return choice_match.group(1).upper()
-    return None
+    return _extract_choice_letter(text, require_answer_tag=True)
 
 
 def score_choice_predictions(predictions: Iterable[str], answer_keys: Iterable[str]) -> dict[str, list[float] | list[str | None]]:

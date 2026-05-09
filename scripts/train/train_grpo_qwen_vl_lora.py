@@ -30,8 +30,14 @@ from src.qwen_vl_rl.modeling_ppo import (
     build_reference_model,
     save_lora_checkpoint,
 )
-from src.qwen_vl_rl.reports import write_prediction_report_from_loader
-from src.qwen_vl_rl.utils import dump_json, ensure_dir, resolve_project_path, set_seed
+from src.qwen_vl_rl.reports import write_test_results_from_loader
+from src.qwen_vl_rl.training_io import (
+    append_metric,
+    log_metrics,
+    prepare_checkpoint_dir,
+    save_optimizer_and_training_state,
+)
+from src.qwen_vl_rl.utils import dump_json, ensure_dir, resolve_object_paths, resolve_project_path, set_seed
 
 
 def parse_args() -> argparse.Namespace:
@@ -42,7 +48,7 @@ def parse_args() -> argparse.Namespace:
         default='configs/grpo_qwen_vl_lora.yaml',
     )
     parser.add_argument('--max-steps', type=int, default=None, help='Optional cap on GRPO prompt updates.')
-    parser.add_argument('--eval-only', action='store_true')
+    parser.add_argument('--test-only', action='store_true', help='Only run test split and write test_results.')
     return parser.parse_args()
 
 
@@ -117,14 +123,6 @@ def run_evaluation(
         'valid_option_rate': float(stats[2].item() / total_count),
         'response_length_mean': float(stats[1].item() / total_count),
     }
-
-
-def append_metric(output_dir: Path, record: dict) -> None:
-    metrics_path = output_dir / 'metrics.jsonl'
-    with metrics_path.open('a', encoding='utf-8') as handle:
-        handle.write(json.dumps(record, ensure_ascii=False) + '\n')
-
-
 def render_training_curve(output_dir: Path) -> None:
     metrics_path = output_dir / 'metrics.jsonl'
     if not metrics_path.exists():
@@ -194,7 +192,7 @@ def save_checkpoint(policy, optimizer, output_dir: Path, step: int, config) -> N
     unwrapped = policy
     if hasattr(policy, 'module'):
         unwrapped = policy.module
-    checkpoint_dir = output_dir / f'checkpoint-{step}'
+    checkpoint_dir = prepare_checkpoint_dir(output_dir, step)
     save_lora_checkpoint(
         policy_model=unwrapped,
         output_dir=checkpoint_dir,
@@ -204,62 +202,44 @@ def save_checkpoint(policy, optimizer, output_dir: Path, step: int, config) -> N
             'algorithm': 'grpo',
         },
     )
-    torch.save(optimizer.state_dict(), checkpoint_dir / 'optimizer.pt')
-    (checkpoint_dir / 'training_state.json').write_text(
-        json.dumps(
-            {
-                'step': step,
-                'base_model': config.model.base_model_name_or_path,
-                'output_dir': str(output_dir),
-                'algorithm': 'grpo',
-            },
-            ensure_ascii=False,
-            indent=2,
-        ),
-        encoding='utf-8',
+    save_optimizer_and_training_state(
+        optimizer=optimizer,
+        checkpoint_dir=checkpoint_dir,
+        training_state={
+            'step': step,
+            'base_model': config.model.base_model_name_or_path,
+            'output_dir': str(output_dir),
+            'algorithm': 'grpo',
+        },
     )
-
-
-def log_metrics(
-    accelerator: Accelerator,
-    prefix: str,
-    metrics: dict[str, float],
-    total_steps: int | None = None,
-) -> None:
-    if accelerator.is_main_process:
-        step = metrics.get('step')
-        pieces = []
-        if step is not None and total_steps is not None:
-            pieces.append(f"step={int(step)}/{total_steps}")
-        for key, value in metrics.items():
-            if key in {'step', 'epoch', 'total_steps'}:
-                continue
-            if isinstance(value, (int, float)):
-                pieces.append(f'{key}={value:.4f}')
-        print(f'[{prefix}] ' + ' '.join(pieces), flush=True)
-
-
 def main() -> None:
     args = parse_args()
     config = load_grpo_config(args.config)
-    config.data.train_file = str(resolve_project_path(config.data.train_file, PROJECT_ROOT))
-    config.model.base_model_name_or_path = str(
-        resolve_project_path(config.model.base_model_name_or_path, PROJECT_ROOT)
+    resolve_object_paths(
+        config.data,
+        PROJECT_ROOT,
+        required_attrs=['train_file'],
     )
-    config.model.sft_adapter_path = (
-        str(resolve_project_path(config.model.sft_adapter_path, PROJECT_ROOT))
-        if config.model.sft_adapter_path
-        else None
+    resolve_object_paths(
+        config.model,
+        PROJECT_ROOT,
+        required_attrs=['base_model_name_or_path'],
+        optional_attrs=['sft_adapter_path'],
     )
-    config.logging.output_dir = str(resolve_project_path(config.logging.output_dir, PROJECT_ROOT))
+    resolve_object_paths(
+        config.logging,
+        PROJECT_ROOT,
+        required_attrs=['output_dir'],
+    )
     set_seed(config.seed)
 
     output_dir = ensure_dir(config.logging.output_dir)
     accelerator = Accelerator(gradient_accumulation_steps=1)
     if accelerator.is_main_process:
         dump_json(config.to_dict(), output_dir / 'resolved_config.json')
-        metrics_path = output_dir / 'metrics.jsonl'
-        metrics_path.write_text('', encoding='utf-8')
+        if not args.test_only:
+            metrics_path = output_dir / 'metrics.jsonl'
+            metrics_path.write_text('', encoding='utf-8')
     accelerator.wait_for_everyone()
 
     if accelerator.is_main_process:
@@ -294,6 +274,42 @@ def main() -> None:
         )
     accelerator.wait_for_everyone()
 
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=config.grpo.per_device_prompt_batch_size,
+        shuffle=False,
+        collate_fn=collator,
+        num_workers=config.data.num_workers,
+        pin_memory=torch.cuda.is_available(),
+    )
+
+    if accelerator.is_main_process:
+        print('Loading policy and reference models...')
+
+    policy = build_lora_policy_backbone(config.model, config.lora)
+
+    if args.test_only:
+        policy = accelerator.prepare(policy)
+        if accelerator.is_main_process:
+            test_output = write_test_results_from_loader(
+                policy=policy,
+                processor=processor,
+                loader=test_loader,
+                accelerator=accelerator,
+                max_new_tokens=config.generation.eval_max_new_tokens,
+                output_dir=output_dir,
+            )
+            print('Test metrics:', test_output['metrics'])
+            dump_json(
+                {
+                    'test_size': len(test_dataset),
+                    'test_metrics': test_output['metrics'],
+                    'test_results': test_output['paths'],
+                },
+                output_dir / 'test_summary.json',
+            )
+        return
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=config.grpo.per_device_prompt_batch_size,
@@ -310,19 +326,7 @@ def main() -> None:
         num_workers=config.data.num_workers,
         pin_memory=torch.cuda.is_available(),
     )
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=config.grpo.per_device_prompt_batch_size,
-        shuffle=False,
-        collate_fn=collator,
-        num_workers=config.data.num_workers,
-        pin_memory=torch.cuda.is_available(),
-    )
 
-    if accelerator.is_main_process:
-        print('Loading policy and reference models...')
-
-    policy = build_lora_policy_backbone(config.model, config.lora)
     reference_model = build_reference_model(config.model)
     optimizer = AdamW(
         [parameter for parameter in policy.parameters() if parameter.requires_grad],
@@ -357,48 +361,6 @@ def main() -> None:
             f'process_index={accelerator.process_index}',
             flush=True,
         )
-
-    if args.eval_only:
-        metrics = run_evaluation(
-            policy=policy,
-            reference_model=reference_model,
-            processor=processor,
-            valid_loader=valid_loader,
-            config=config,
-            accelerator=accelerator,
-            max_batches=args.max_steps,
-        )
-        if accelerator.is_main_process:
-            report_paths = write_prediction_report_from_loader(
-                policy=policy,
-                processor=processor,
-                loader=test_loader,
-                accelerator=accelerator,
-                max_new_tokens=config.generation.eval_max_new_tokens,
-                output_dir=output_dir,
-            )
-            append_metric(
-                output_dir,
-                {
-                    'phase': 'eval',
-                    'step': 0,
-                    'epoch': -1,
-                    'total_steps': total_steps,
-                    **metrics,
-                },
-            )
-            print('Eval metrics:', metrics)
-            dump_json(
-                {
-                    'test_size': len(test_dataset),
-                    'global_step': 0,
-                    'total_steps': total_steps,
-                    'final_eval': metrics,
-                    'test_results': report_paths,
-                },
-                output_dir / 'test_summary.json',
-            )
-        return
 
     global_step = 0
     for epoch in range(config.num_train_epochs):
@@ -499,7 +461,7 @@ def main() -> None:
         final_eval['step'] = float(global_step)
         final_eval['epoch'] = float(config.num_train_epochs - 1)
         final_eval['total_steps'] = float(total_steps)
-        report_paths = write_prediction_report_from_loader(
+        test_output = write_test_results_from_loader(
             policy=policy,
             processor=processor,
             loader=test_loader,
@@ -521,7 +483,8 @@ def main() -> None:
                 'global_step': global_step,
                 'total_steps': total_steps,
                 'final_eval': final_eval,
-                'test_results': report_paths,
+                'test_metrics': test_output['metrics'],
+                'test_results': test_output['paths'],
             },
             output_dir / 'train_summary.json',
         )

@@ -7,6 +7,7 @@ import torch
 
 from .modeling_ppo import compute_policy_outputs_from_model_outputs, gather_log_probs
 from .reward import score_choice_predictions
+from .utils import move_tensors_to_device
 
 
 # 封装一次 PPO rollout 生成的所有中间数据
@@ -95,7 +96,7 @@ def generate_rollout_batch(
     accelerator,
     eval_mode: bool = False,
 ) -> RolloutBatch:
-    prompt_inputs = move_batch_to_device(batch['prompt_inputs'], accelerator.device)
+    prompt_inputs = move_tensors_to_device(batch['prompt_inputs'], accelerator.device)
     prompt_attention_mask = prompt_inputs['attention_mask']
     prompt_padded_length = prompt_inputs['input_ids'].shape[1]
     visual_patch_counts = prompt_inputs['image_grid_thw'].prod(dim=1)
@@ -330,16 +331,6 @@ def compute_gae(rewards: torch.Tensor, values: torch.Tensor, mask: torch.Tensor,
     return advantages, returns
 
 
-def move_batch_to_device(batch: dict[str, Any], device: torch.device) -> dict[str, Any]:
-    output: dict[str, Any] = {}
-    for key, value in batch.items():
-        if torch.is_tensor(value):
-            output[key] = value.to(device)
-        else:
-            output[key] = value
-    return output
-
-
 def build_response_attention_mask(generated_tokens: torch.Tensor, eos_token_ids: set[int]) -> torch.Tensor:
     batch_size, max_steps = generated_tokens.shape
     attention_mask = torch.zeros((batch_size, max_steps), dtype=torch.long, device=generated_tokens.device)
@@ -352,6 +343,10 @@ def build_response_attention_mask(generated_tokens: torch.Tensor, eos_token_ids:
                 break
         attention_mask[row_index, :response_length] = 1
     return attention_mask
+
+
+def move_batch_to_device(batch: dict[str, Any], device: torch.device) -> dict[str, Any]:
+    return move_tensors_to_device(batch, device)
 
 
 def decode_response_texts(processor, sequences: torch.Tensor, response_attention_mask: torch.Tensor, prompt_padded_length: int) -> list[str]:
