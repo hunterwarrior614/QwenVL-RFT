@@ -1,4 +1,4 @@
-# qwen_rl
+# QwenVL-RFT
 
 基于 `Qwen2.5-VL-3B-Instruct`，在 Thyme-SFT 转换得到的单图多选 VQA 数据上实现：
 
@@ -80,14 +80,6 @@ outputs/
   grpo/
 ```
 
-推荐规则：
-
-- SFT 输出到 `outputs/sft/<run_name>/`
-- PPO 输出到 `outputs/ppo/<run_name>/`
-- GRPO 输出到 `outputs/grpo/<run_name>/`
-- 不要覆盖原始 Qwen 目录
-- 项目名已经是 `qwen_rl`，不要再套一层同名目录
-
 ## 5. 最佳实践训练路线
 
 推荐路线：
@@ -97,7 +89,7 @@ outputs/
 
 原因很简单：
 
-- 你的 reward 是 `exact match`，非常稀疏
+- reward 是 `exact match`，非常稀疏
 - 如果直接从 base instruct 做 PPO，前期更容易只学到“格式修正”而不是“答对题”
 - 先用 SFT 让模型学会稳定输出 `<answer>A</answer>`，再做 PPO / GRPO 会更稳
 
@@ -154,7 +146,7 @@ python scripts/data_process/convert_thyme_sft_to_qwen_vl_rl.py \
 | PPO | `python scripts/train/train_ppo_qwen_vl_lora.py --config configs/ppo_qwen_vl_lora.yaml [--max-steps 1]` | `accelerate launch --num_processes 4 scripts/train/train_ppo_qwen_vl_lora.py --config configs/ppo_qwen_vl_lora.yaml [--max-steps 1]` |
 | GRPO | `python scripts/train/train_grpo_qwen_vl_lora.py --config configs/grpo_qwen_vl_lora.yaml [--max-steps 1]` | `accelerate launch --num_processes 4 scripts/train/train_grpo_qwen_vl_lora.py --config configs/grpo_qwen_vl_lora.yaml [--max-steps 1]` |
 
-PPO / GRPO 的 `model.sft_adapter_path` 要先指向你要接续的 SFT checkpoint。
+PPO / GRPO 的 `model.sft_adapter_path` 要先指向要接续的 SFT checkpoint。
 
 三种训练脚本都支持从已有 checkpoint 继续训练：
 
@@ -256,28 +248,3 @@ python scripts/plot_metrics.py outputs/grpo/default --kind grpo --rolling-window
 - `num_generations=4`
 - `per_device_minibatch_size=1`
 
-## 10. 目录结构
-
-```text
-configs/
-  sft_qwen_vl_lora.yaml
-  ppo_qwen_vl_lora.yaml
-  grpo_qwen_vl_lora.yaml
-data/
-  wo_thinking_thyme_single_round-00000-of-00146.qwen_vl_ppo.jsonl
-  wo_thinking_thyme_single_round-00000-of-00146.qwen_vl_grpo.jsonl
-  wo_thinking_thyme_single_round-00000-of-00146.qwen_vl_rl_manifest.json
-scripts/
-  data_process/
-    convert_thyme_sft_to_qwen_vl_rl.py
-  train/
-    train_sft_qwen_vl_lora.py
-    train_ppo_qwen_vl_lora.py
-    train_grpo_qwen_vl_lora.py
-src/
-  qwen_vl_rl/
-outputs/
-  sft/
-  ppo/
-  grpo/
-```

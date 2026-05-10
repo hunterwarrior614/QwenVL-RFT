@@ -1,5 +1,5 @@
 seed: 42
-num_train_epochs: 1
+num_train_epochs: 20
 data:
   train_file: data/wo_thinking_thyme_single_round-00000-of-00146.qwen_vl_grpo.jsonl
   train_size: 1000
@@ -12,7 +12,7 @@ data:
   image_max_longest_edge: 1024
 model:
   base_model_name_or_path: ../Qwen/Qwen2.5-VL-3B-Instruct
-  sft_adapter_path: outputs/sft/default/checkpoint-50/adapter
+  sft_adapter_path: outputs/sft/default/checkpoint-100/adapter
   torch_dtype: bfloat16
   attn_implementation: sdpa
   gradient_checkpointing: true
@@ -32,8 +32,8 @@ generation:
   max_new_tokens: 16
   min_new_tokens: 1
   do_sample: true
-  temperature: 0.9
-  top_p: 0.95
+  temperature: 0.7
+  top_p: 0.9
   top_k: 0
   repetition_penalty: 1.0
   eval_max_new_tokens: 16
@@ -46,7 +46,7 @@ optimizer:
   max_grad_norm: 1.0
 grpo:
   per_device_prompt_batch_size: 1
-  num_generations: 8
+  num_generations: 4
   per_device_minibatch_size: 1
   grpo_epochs: 1
   cliprange: 0.2
