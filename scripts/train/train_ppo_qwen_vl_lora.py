@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import json
 from pathlib import Path
 import re
@@ -27,8 +28,11 @@ from src.qwen_vl_rl.reports import write_test_results_from_loader
 from src.qwen_vl_rl.training_io import (
     append_metric,
     estimate_total_training_steps,
+    load_optimizer_state_if_available,
     log_metrics,
     prepare_checkpoint_dir,
+    resolve_resume_checkpoint,
+    resume_step_from_checkpoint,
     save_optimizer_and_training_state,
 )
 from src.qwen_vl_rl.utils import dump_json, ensure_dir, resolve_object_paths, resolve_project_path, set_seed
@@ -42,6 +46,15 @@ def parse_args() -> argparse.Namespace:
         default='configs/ppo_qwen_vl_lora.yaml',
     )
     parser.add_argument('--max-steps', type=int, default=None, help='Optional cap on PPO prompt updates.')
+    parser.add_argument(
+        '--resume-from-checkpoint',
+        type=str,
+        default=None,
+        help=(
+            'Resume training from a PPO checkpoint directory, its adapter/ subdirectory, '
+            'or "latest" for the newest checkpoint under output_dir.'
+        ),
+    )
     parser.add_argument('--test-only', action='store_true', help='Only run test split and write test_results.')
     parser.add_argument(
         '--policy-adapter-path',
@@ -76,6 +89,15 @@ def resolve_test_policy_adapter_path(output_dir: Path, configured_sft_adapter_pa
     if configured_sft_adapter_path:
         return str(_normalize_adapter_path(Path(configured_sft_adapter_path)).resolve())
     return None
+
+
+def load_value_head_from_checkpoint(policy, checkpoint_dir: Path) -> None:
+    value_head_path = checkpoint_dir / 'value_head.pt'
+    if not value_head_path.exists():
+        raise ValueError(
+            f'PPO resume checkpoint is missing value_head.pt: {checkpoint_dir}'
+        )
+    policy.value_head.load_state_dict(torch.load(value_head_path, map_location='cpu'))
 
 
 def summarize_rollout(rollout) -> dict[str, float]:
@@ -289,11 +311,19 @@ def main() -> None:
     set_seed(config.seed)
 
     output_dir = ensure_dir(config.logging.output_dir)
+    resume_checkpoint = resolve_resume_checkpoint(
+        args.resume_from_checkpoint,
+        output_dir=output_dir,
+        project_root=PROJECT_ROOT,
+    )
     if args.test_only:
+        explicit_test_adapter = args.policy_adapter_path
+        if resume_checkpoint is not None:
+            explicit_test_adapter = str(resume_checkpoint)
         config.model.sft_adapter_path = resolve_test_policy_adapter_path(
             output_dir=output_dir,
             configured_sft_adapter_path=config.model.sft_adapter_path,
-            explicit_path=args.policy_adapter_path,
+            explicit_path=explicit_test_adapter,
         )
         if config.model.sft_adapter_path is None:
             raise ValueError(
@@ -305,8 +335,12 @@ def main() -> None:
     # 其作用是自动处理分布式训练（多 GPU、TPU、混合精度等），同时简化设备管理、梯度累积和混合精度训练等代码
     accelerator = Accelerator(gradient_accumulation_steps=1)
     if accelerator.is_main_process:
-        dump_json(config.to_dict(), output_dir / 'resolved_config.json')
-        if not args.test_only:
+        resolved_config = config.to_dict()
+        resolved_config['resume_from_checkpoint'] = (
+            str(resume_checkpoint) if resume_checkpoint is not None else None
+        )
+        dump_json(resolved_config, output_dir / 'resolved_config.json')
+        if not args.test_only and resume_checkpoint is None:
             metrics_path = output_dir / 'metrics.jsonl'
             metrics_path.write_text('', encoding='utf-8')   # 清空文件内容
     accelerator.wait_for_everyone()
@@ -357,8 +391,14 @@ def main() -> None:
         if args.test_only:
             print(f'[ppo/test-only] loading adapter from {config.model.sft_adapter_path}')
 
+    policy_model_config = deepcopy(config.model)
+    if resume_checkpoint is not None and not args.test_only:
+        policy_model_config.sft_adapter_path = str(resume_checkpoint / 'adapter')
+
     # 获得策略网络 Actor
-    policy = build_policy_model(config.model, config.lora)
+    policy = build_policy_model(policy_model_config, config.lora)
+    if resume_checkpoint is not None and not args.test_only:
+        load_value_head_from_checkpoint(policy, resume_checkpoint)
 
     if args.test_only:
         policy = accelerator.prepare(policy)
@@ -425,6 +465,18 @@ def main() -> None:
         valid_loader,
     )
     reference_model.eval()
+    global_step = 0
+    if resume_checkpoint is not None:
+        global_step = resume_step_from_checkpoint(resume_checkpoint)
+        optimizer_loaded = load_optimizer_state_if_available(optimizer, resume_checkpoint)
+        if accelerator.is_main_process:
+            print(
+                '[ppo/resume] '
+                f'checkpoint={resume_checkpoint} '
+                f'step={global_step} '
+                f'optimizer_loaded={optimizer_loaded}',
+                flush=True,
+            )
     if accelerator.is_main_process:
         print(
             '[ppo/setup] '
@@ -439,10 +491,13 @@ def main() -> None:
             flush=True,
         )
 
-    global_step = 0
     for epoch in range(config.num_train_epochs):
+        if global_step >= total_steps:
+            break
         policy.train()
         for batch in train_loader:
+            if global_step >= total_steps:
+                break
             rollout = generate_rollout_batch(
                 policy=policy,
                 reference_model=reference_model,
@@ -521,10 +576,10 @@ def main() -> None:
             if global_step % config.logging.save_steps == 0 and accelerator.is_main_process:
                 save_checkpoint(policy, optimizer, output_dir, global_step, config)
 
-            if args.max_steps is not None and global_step >= args.max_steps:
+            if global_step >= total_steps:
                 break
 
-        if args.max_steps is not None and global_step >= args.max_steps:
+        if global_step >= total_steps:
             break
 
     accelerator.wait_for_everyone()

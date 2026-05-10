@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 import torch
 import yaml
 from accelerate import Accelerator
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_kbit_training
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from transformers import (
@@ -33,8 +33,13 @@ from src.qwen_vl_rl.reports import write_test_results_from_loader
 from src.qwen_vl_rl.answering import extract_choice_letter
 from src.qwen_vl_rl.sft import QwenVLSFTCollator, create_sft_datasets_from_ppo_records
 from src.qwen_vl_rl.training_io import (
+    advance_scheduler_to_step,
     estimate_total_training_steps,
+    load_optimizer_state_if_available,
+    load_scheduler_state_if_available,
     prepare_checkpoint_dir,
+    resolve_resume_checkpoint,
+    resume_step_from_checkpoint,
     save_optimizer_and_training_state,
 )
 from src.qwen_vl_rl.utils import (
@@ -57,6 +62,15 @@ def parse_args() -> argparse.Namespace:
         default='configs/sft_qwen_vl_lora.yaml',
     )
     parser.add_argument('--max-steps', type=int, default=None)
+    parser.add_argument(
+        '--resume-from-checkpoint',
+        type=str,
+        default=None,
+        help=(
+            'Resume from a checkpoint directory, its adapter/ subdirectory, or "latest" '
+            'for the newest checkpoint under output_dir.'
+        ),
+    )
     return parser.parse_args()
 
 
@@ -136,7 +150,7 @@ def evaluate(
     }
 
 
-def save_checkpoint(model, processor, optimizer, output_dir: Path, step: int) -> None:
+def save_checkpoint(model, processor, optimizer, scheduler, output_dir: Path, step: int) -> None:
     checkpoint_dir = prepare_checkpoint_dir(output_dir, step)
     model.save_pretrained(checkpoint_dir / 'adapter')
     processor.save_pretrained(checkpoint_dir / 'processor')
@@ -144,6 +158,7 @@ def save_checkpoint(model, processor, optimizer, output_dir: Path, step: int) ->
         optimizer=optimizer,
         checkpoint_dir=checkpoint_dir,
         training_state={'step': step},
+        scheduler=scheduler,
     )
 
 
@@ -205,6 +220,11 @@ def main() -> None:
     set_seed(config['seed'])
 
     output_dir = ensure_dir(config['output_dir'])
+    resume_checkpoint = resolve_resume_checkpoint(
+        args.resume_from_checkpoint,
+        output_dir=output_dir,
+        project_root=PROJECT_ROOT,
+    )
 
     # 每经过 gradient_accumulation_steps 个 mini-batch 才执行一次参数更新，
     # 当显存不足以支持较大的批次时，通过梯度累积来模拟更大的有效批次。
@@ -212,9 +232,14 @@ def main() -> None:
         gradient_accumulation_steps=config['gradient_accumulation_steps']
     )
     if accelerator.is_main_process:
-        dump_json(config, output_dir / 'resolved_config.json')
-        metrics_path = output_dir / 'metrics.jsonl'
-        metrics_path.write_text('', encoding='utf-8')
+        resolved_config = dict(config)
+        resolved_config['resume_from_checkpoint'] = (
+            str(resume_checkpoint) if resume_checkpoint is not None else None
+        )
+        dump_json(resolved_config, output_dir / 'resolved_config.json')
+        if resume_checkpoint is None:
+            metrics_path = output_dir / 'metrics.jsonl'
+            metrics_path.write_text('', encoding='utf-8')
     accelerator.wait_for_everyone()
     # 加载模型
     processor = AutoProcessor.from_pretrained(config['base_model_name_or_path'])
@@ -251,16 +276,23 @@ def main() -> None:
     if config.get('load_in_4bit', False):
         model = prepare_model_for_kbit_training(model)
 
-    target_modules = resolve_lora_targets(model, config['lora_target_modules_regex'])
-    peft_config = LoraConfig(
-        r=config['lora_r'],
-        lora_alpha=config['lora_alpha'],
-        lora_dropout=config['lora_dropout'],
-        bias=config['lora_bias'],
-        target_modules=target_modules,
-        task_type='CAUSAL_LM',
-    )
-    model = get_peft_model(model, peft_config)
+    if resume_checkpoint is not None:
+        model = PeftModel.from_pretrained(
+            model,
+            resume_checkpoint / 'adapter',
+            is_trainable=True,
+        )
+    else:
+        target_modules = resolve_lora_targets(model, config['lora_target_modules_regex'])
+        peft_config = LoraConfig(
+            r=config['lora_r'],
+            lora_alpha=config['lora_alpha'],
+            lora_dropout=config['lora_dropout'],
+            bias=config['lora_bias'],
+            target_modules=target_modules,
+            task_type='CAUSAL_LM',
+        )
+        model = get_peft_model(model, peft_config)
     if config.get('gradient_checkpointing', False):
         model.gradient_checkpointing_enable()
         model.config.use_cache = False
@@ -303,8 +335,16 @@ def main() -> None:
         max_steps=args.max_steps,
     )
     warmup_steps = max(1, int(total_steps * config['warmup_ratio']))
+    # Accelerator.prepare 会将 scheduler 包装为 AcceleratedScheduler。
+    # 在默认 split_batches=False 的多卡训练中，每次真实 optimizer step
+    # 会推动底层 scheduler 前进 num_processes 次，因此这里需要按进程数放大
+    # scheduler 看到的总步数和 warmup 步数。
+    scheduler_total_steps = total_steps * accelerator.num_processes
+    scheduler_warmup_steps = warmup_steps * accelerator.num_processes
     scheduler = get_cosine_schedule_with_warmup(
-        optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps
+        optimizer,
+        num_warmup_steps=scheduler_warmup_steps,
+        num_training_steps=scheduler_total_steps,
     )
 
     if accelerator.is_main_process:
@@ -316,6 +356,8 @@ def main() -> None:
             f"grad_accum={config['gradient_accumulation_steps']} "
             f"total_steps={total_steps} "
             f"warmup_steps={warmup_steps} "
+            f"scheduler_total_steps={scheduler_total_steps} "
+            f"scheduler_warmup_steps={scheduler_warmup_steps} "
             f"num_processes={accelerator.num_processes} "
             f"process_index={accelerator.process_index}",
             flush=True,
@@ -330,9 +372,34 @@ def main() -> None:
     )
 
     global_step = 0
+    if resume_checkpoint is not None:
+        global_step = resume_step_from_checkpoint(resume_checkpoint)
+        optimizer_loaded = load_optimizer_state_if_available(optimizer, resume_checkpoint)
+        scheduler_loaded = load_scheduler_state_if_available(scheduler, resume_checkpoint)
+        scheduler_advanced_steps = 0
+        if not scheduler_loaded:
+            scheduler_advanced_steps = advance_scheduler_to_step(
+                scheduler,
+                global_step * accelerator.num_processes,
+            )
+        if accelerator.is_main_process:
+            print(
+                '[sft/resume] '
+                f'checkpoint={resume_checkpoint} '
+                f'step={global_step} '
+                f'optimizer_loaded={optimizer_loaded} '
+                f'scheduler_loaded={scheduler_loaded} '
+                f'scheduler_advanced_steps={scheduler_advanced_steps}',
+                flush=True,
+            )
+
     for epoch in range(config['num_train_epochs']):
+        if global_step >= total_steps:
+            break
         model.train()
         for batch in train_loader:
+            if global_step >= total_steps:
+                break
             with accelerator.accumulate(model):
                 model_inputs = move_tensors_to_device(batch['model_inputs'], accelerator.device)
                 outputs = model(**model_inputs)
@@ -402,6 +469,7 @@ def main() -> None:
                         accelerator.unwrap_model(model),
                         processor,
                         optimizer,
+                        scheduler,
                         output_dir,
                         global_step,
                     )
@@ -448,6 +516,7 @@ def main() -> None:
             accelerator.unwrap_model(model),
             processor,
             optimizer,
+            scheduler,
             output_dir,
             global_step,
         )

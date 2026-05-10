@@ -156,6 +156,16 @@ python scripts/data_process/convert_thyme_sft_to_qwen_vl_rl.py \
 
 PPO / GRPO 的 `model.sft_adapter_path` 要先指向你要接续的 SFT checkpoint。
 
+三种训练脚本都支持从已有 checkpoint 继续训练：
+
+```bash
+python scripts/train/train_sft_qwen_vl_lora.py --config configs/sft_qwen_vl_lora.yaml --resume-from-checkpoint latest
+python scripts/train/train_ppo_qwen_vl_lora.py --config configs/ppo_qwen_vl_lora.yaml --resume-from-checkpoint outputs/ppo/default/checkpoint-100 --max-steps 150
+python scripts/train/train_grpo_qwen_vl_lora.py --config configs/grpo_qwen_vl_lora.yaml --resume-from-checkpoint outputs/grpo/default/checkpoint-50 --max-steps 100
+```
+
+`--resume-from-checkpoint` 可以传 `latest`、`checkpoint-XX`、完整 checkpoint 路径，或 checkpoint 下的 `adapter/` 路径。续训时会保留原有 `metrics.jsonl` 并继续追加；`--max-steps` 表示目标总 step 数，例如从 `checkpoint-100` 继续到 `--max-steps 150` 会再训练 50 个 step。
+
 ## 8. 推理与结果查看
 
 三种训练都会在训练结束后自动跑测试集，并生成逐样本报告：
@@ -186,6 +196,16 @@ python scripts/train/train_grpo_qwen_vl_lora.py --config configs/grpo_qwen_vl_lo
 - SFT：`outputs/sft/<run_name>/metrics.jsonl`、`training_curve.png`、`train_summary.json`
 - PPO / GRPO：日志中的 `reward_mean`、`accuracy`、`valid_option_rate`、`response_length_mean`、`kl_mean`
 - 测试集直观效果：相应目录下的 `test_results.html`
+
+已有 `metrics.jsonl` 时，可以单独重画训练曲线，不需要重新训练：
+
+```bash
+python scripts/plot_metrics.py outputs/sft/default --kind sft
+python scripts/plot_metrics.py outputs/ppo/default --kind ppo --rolling-window 20
+python scripts/plot_metrics.py outputs/grpo/default --kind grpo --rolling-window 20
+```
+
+默认输出到对应目录下的 `training_curve.png`。也可以传 `--output <path>` 指定图片路径。
 
 说明：配置里的 `eval_size` 指 validation split；测试集只用于最终逐样本报告。
 报告中的 `raw_response` 是模型原始 decoded response，`prediction` 是去掉首尾空白后的版本。

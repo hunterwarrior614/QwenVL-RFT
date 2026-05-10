@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import json
 from pathlib import Path
 import sys
@@ -34,8 +35,11 @@ from src.qwen_vl_rl.reports import write_test_results_from_loader
 from src.qwen_vl_rl.training_io import (
     append_metric,
     estimate_total_training_steps,
+    load_optimizer_state_if_available,
     log_metrics,
     prepare_checkpoint_dir,
+    resolve_resume_checkpoint,
+    resume_step_from_checkpoint,
     save_optimizer_and_training_state,
 )
 from src.qwen_vl_rl.utils import dump_json, ensure_dir, resolve_object_paths, resolve_project_path, set_seed
@@ -49,6 +53,15 @@ def parse_args() -> argparse.Namespace:
         default='configs/grpo_qwen_vl_lora.yaml',
     )
     parser.add_argument('--max-steps', type=int, default=None, help='Optional cap on GRPO prompt updates.')
+    parser.add_argument(
+        '--resume-from-checkpoint',
+        type=str,
+        default=None,
+        help=(
+            'Resume training from a GRPO checkpoint directory, its adapter/ subdirectory, '
+            'or "latest" for the newest checkpoint under output_dir.'
+        ),
+    )
     parser.add_argument('--test-only', action='store_true', help='Only run test split and write test_results.')
     return parser.parse_args()
 
@@ -244,10 +257,22 @@ def main() -> None:
     set_seed(config.seed)
 
     output_dir = ensure_dir(config.logging.output_dir)
+    resume_checkpoint = resolve_resume_checkpoint(
+        args.resume_from_checkpoint,
+        output_dir=output_dir,
+        project_root=PROJECT_ROOT,
+    )
+    if args.test_only and resume_checkpoint is not None:
+        config.model.sft_adapter_path = str(resume_checkpoint / 'adapter')
+
     accelerator = Accelerator(gradient_accumulation_steps=1)
     if accelerator.is_main_process:
-        dump_json(config.to_dict(), output_dir / 'resolved_config.json')
-        if not args.test_only:
+        resolved_config = config.to_dict()
+        resolved_config['resume_from_checkpoint'] = (
+            str(resume_checkpoint) if resume_checkpoint is not None else None
+        )
+        dump_json(resolved_config, output_dir / 'resolved_config.json')
+        if not args.test_only and resume_checkpoint is None:
             metrics_path = output_dir / 'metrics.jsonl'
             metrics_path.write_text('', encoding='utf-8')
     accelerator.wait_for_everyone()
@@ -296,7 +321,11 @@ def main() -> None:
     if accelerator.is_main_process:
         print('Loading policy and reference models...')
 
-    policy = build_lora_policy_backbone(config.model, config.lora)
+    policy_model_config = deepcopy(config.model)
+    if resume_checkpoint is not None and not args.test_only:
+        policy_model_config.sft_adapter_path = str(resume_checkpoint / 'adapter')
+
+    policy = build_lora_policy_backbone(policy_model_config, config.lora)
 
     if args.test_only:
         policy = accelerator.prepare(policy)
@@ -360,6 +389,18 @@ def main() -> None:
         valid_loader,
     )
     reference_model.eval()
+    global_step = 0
+    if resume_checkpoint is not None:
+        global_step = resume_step_from_checkpoint(resume_checkpoint)
+        optimizer_loaded = load_optimizer_state_if_available(optimizer, resume_checkpoint)
+        if accelerator.is_main_process:
+            print(
+                '[grpo/resume] '
+                f'checkpoint={resume_checkpoint} '
+                f'step={global_step} '
+                f'optimizer_loaded={optimizer_loaded}',
+                flush=True,
+            )
     if accelerator.is_main_process:
         print(
             '[grpo/setup] '
@@ -375,10 +416,13 @@ def main() -> None:
             flush=True,
         )
 
-    global_step = 0
     for epoch in range(config.num_train_epochs):
+        if global_step >= total_steps:
+            break
         policy.train()
         for batch in train_loader:
+            if global_step >= total_steps:
+                break
             rollout = generate_grpo_rollout_batch(
                 policy=policy,
                 reference_model=reference_model,
@@ -455,10 +499,10 @@ def main() -> None:
             if global_step % config.logging.save_steps == 0 and accelerator.is_main_process:
                 save_checkpoint(policy, optimizer, output_dir, global_step, config)
 
-            if args.max_steps is not None and global_step >= args.max_steps:
+            if global_step >= total_steps:
                 break
 
-        if args.max_steps is not None and global_step >= args.max_steps:
+        if global_step >= total_steps:
             break
 
     accelerator.wait_for_everyone()
